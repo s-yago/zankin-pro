@@ -1,0 +1,1211 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>残金決済・清算書作成ツール Pro</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Meiryo UI','Meiryo','MS Gothic',sans-serif;background:#e8e8e8;font-size:12px}
+input,select,button{font-family:inherit}
+input[type=number]::-webkit-inner-spin-button{opacity:0.3}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-thumb{background:#ccc;border-radius:3px}
+@media print{
+  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+  body *{visibility:hidden!important}
+  #print-area,#print-area *{visibility:visible!important}
+  #print-area{position:absolute;top:0;left:0;width:100%;max-width:100%!important;box-shadow:none!important;margin:0!important}
+  #print-area>div{padding:10mm 12mm!important;font-size:9.5pt!important;line-height:1.5!important}
+  table{page-break-inside:avoid;border-collapse:collapse}
+  tr{page-break-inside:avoid}
+  @page{margin:0}
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useMemo,useEffect,useCallback}=React;
+const yen=(v)=>(Math.round(Number(v)||0)).toLocaleString("ja-JP")+" 円";
+const num=(v)=>parseFloat(String(v).replace(/,/g,""))||0;
+const fmt=(v)=>(Math.round(Number(v)||0)).toLocaleString("ja-JP");
+const jDate=(s)=>{if(!s)return"";const d=new Date(s);return`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`};
+const md=(d)=>`${d.getMonth()+1}月${d.getDate()}日`;
+const toReiwa=(s)=>{if(!s)return"　　年　　月　　日";const d=new Date(s);return`令和${d.getFullYear()-2018}年${d.getMonth()+1}月${d.getDate()}日`};
+
+// ===== ストレージキー =====
+const SK_CASES="zankin_pro_cases";
+const SK_SETTINGS="zankin_pro_settings";
+const SK_AUTH="zankin_pro_auth";
+
+// ===== デフォルト会社設定 =====
+const DEFAULT_SETTINGS={
+  companyName:"",
+  companyNameEn:"",
+  companyTel:"",
+  companyAddress:"",
+  staffList:["担当者1"],
+  // 振込先（複数）
+  bankAccounts:[
+    {label:"メイン口座",bankName:"",bankBranch:"",bankType:"普通",bankNo:"",bankHolder:""}
+  ],
+  // 司法書士リスト
+  shihoShoshiList:["その他"],
+  // インフラ連絡先
+  infraElecName:"電力会社",infraElecTel:"",
+  infraWaterName:"水道局",infraWaterTel:"",
+  infraGasName:"ガス会社",infraGasTel:"",
+  // 固都税デフォルト
+  defaultTaxBase:"4/1",
+  // 免責事項表示
+  showDisclaimer:true,
+  // 覚書条項番号（戸建・土地）
+  memo_tatemonoArticleA:"1",  // 〇：売買の目的物及び売買代金
+  memo_tatemonoArticleB:"3",  // △：測量図の引渡し及び境界の明示
+  memo_tatemonoArticleC:"5",  // □：売買代金の支払時期及びその方法
+  memo_tatemonoArticleD:"6",  // ☆：売買代金の清算
+  // 覚書条項番号（土地）
+  memo_tochiArticleA:"1",
+  memo_tochiArticleB:"3",
+  memo_tochiArticleC:"5",
+  memo_tochiArticleD:"6",
+  // ログイン設定（簡易）
+  loginId:"admin",
+  loginPass:"password",
+};
+
+// ===== 設定読み込み =====
+function loadSettings(){
+  try{const s=localStorage.getItem(SK_SETTINGS);if(s)return{...DEFAULT_SETTINGS,...JSON.parse(s)};}catch{}
+  return{...DEFAULT_SETTINGS};
+}
+function saveSettings(s){try{localStorage.setItem(SK_SETTINGS,JSON.stringify(s));}catch{}}
+
+// ===== INIT（設定から動的生成） =====
+function makeINIT(cfg){
+  const firstBank=cfg.bankAccounts?.[0];
+  const firstShiho=cfg.shihoShoshiList?.[0]||"その他";
+  const firstStaff=cfg.staffList?.[0]||"";
+  return{
+    propType:"戸建",txType:"売主",address:"",addressZip:"",
+    sellers:[{name:"",addr:""}],
+    buyers:[{name:"",addr:""}],
+    contractDate:"",settlementDT:"",settlementTime:"10:00",
+    gathering:"あり",gatheringPlace:"",
+    viviBank:firstBank?.label||"",
+    shihoShoshi:firstShiho,shihoShoshiOther:"",
+    mendan:"なし",mendanDT:"",mendanTime:"10:00",mendanPlace:"",
+    bMendan:"なし",bMendanDT:"",bMendanTime:"10:00",bMendanPlace:"",
+    bMendanTiming:"本人面談を別途実施",
+    taxRounding:"切り捨て",cityTax:"あり",
+    salePrice:0,deposit:0,unitPrice:0,officialArea:0,actualArea:0,
+    taxAnnual:0,taxBase:cfg.defaultTaxBase||"4/1",overYear:"なし",
+    mgmtMonthly:0,repairMonthly:0,mgmtClearMonths:"当月のみ",mgmtOtherLabel:"",mgmtOtherAmt:0,
+    loanBalance:0,sBrokerTotal:0,sBrokerPaid:0,
+    sProxy1:0,sProxy2:0,sProxy3:0,sProxy4:0,sProxy5:0,sProxy6:0,
+    sCashLabel1:"印紙代",sCashAmt1:0,sCashLabel2:"",sCashAmt2:0,
+    sJuminCount:"1",sInkanCount:"1",sKenriCount:"1",
+    sKosekiHuhyo:"表示",showInkanWarning:"表示",
+    sExtraLabel1:"",sExtraLabel2:"",sExtraLabel3:"",
+    sellerBankName:"",sellerBankType:"普通",sellerBankNo:"",sellerBankHolder:"",
+    bBrokerTotal:0,bBrokerPaid:0,loanUse:"あり",loanAmount:0,
+    kinshoDT:"",kinshoTime:"10:00",kinshoPlace:"",
+    preMove:"あり",bJuminKinsho:"2",bInkanKinsho:"2",bOtherKinsho:"収入印紙",
+    bJuminSettle:"1",bInkanSettle:"0",bRegFee:0,reformTotal:0,reformDepositYN:"なし",reformDepositAmt:0,
+    bOtherProxy:0,bLoanFee:0,bFireInsurance:0,bMgmtFund:0,bTransferFee:1100,bOtherDraw:0,
+    bCashLabel1:"印紙代",bCashAmt1:0,bCashLabel2:"",bCashAmt2:0,
+    bJuminTransfer:"0",bInkanTransfer:"0",
+    bExtraLabel1:"",bExtraLabel2:"",bExtraLabel3:"",
+    staff:firstStaff,
+  };
+}
+
+const getSellers=(d)=>d.sellers||[{name:d.sellerName||"",addr:d.sellerAddr||""}];
+const getBuyers=(d)=>d.buyers||[{name:d.buyerName||"",addr:""}];
+const getSellerName=(d)=>getSellers(d)[0]?.name||"";
+const getBuyerName=(d)=>getBuyers(d)[0]?.name||"";
+
+function calcAll(d,cfg){
+  const sDate=new Date(d.settlementDT||new Date());
+  let uPrice=num(d.unitPrice);
+  const oArea=num(d.officialArea),aArea=num(d.actualArea);
+  if(uPrice===0&&oArea>0)uPrice=num(d.salePrice)/oArea;
+  let fRem,rText="";
+  if(uPrice>0&&aArea>0&&oArea>0){
+    const newTotal=Math.floor(uPrice*aArea);
+    fRem=newTotal-num(d.deposit);
+    const diff=Math.round((aArea-oArea)*100)/100;
+    rText=`実測面積は ${aArea.toFixed(2)}㎡（予定より${Math.abs(diff).toFixed(2)}㎡増減）\n新総額 ${fmt(newTotal)}円 － 手付金 ＝ 残代金 ${fmt(fRem)}円`;
+  }else{fRem=Math.round(num(d.salePrice)-num(d.deposit));}
+  const taxLabel=d.cityTax==="あり"?"固定資産税及び都市計画税":"固定資産税";
+  const kMo=d.taxBase==="1/1"?1:4;
+  let stYear=sDate.getFullYear();
+  if(kMo===4&&sDate.getMonth()+1<4)stYear-=1;
+  const startDate=new Date(stYear,kMo-1,1);
+  const endDate=new Date(stYear+1,kMo-1,1);
+  const tAnn=Math.round(num(d.taxAnnual));
+  const totalDays=Math.round((endDate-startDate)/86400000);
+  const sellerDays=Math.round((sDate-startDate)/86400000);
+  const buyerDays=totalDays-sellerDays;
+  const roundFn=d.taxRounding==="四捨五入"?Math.round:Math.floor;
+  const tSel=roundFn(tAnn*(sellerDays/totalDays));
+  let tBuy=tAnn-tSel,tNextYear=0;
+  if(d.overYear==="あり"){tNextYear=tAnn;tBuy+=tNextYear;}
+  const mBase=Math.round(num(d.mgmtMonthly)),rBase=Math.round(num(d.repairMonthly));
+  const mOther=Math.round(num(d.mgmtOtherAmt));
+  const mTot=mBase+rBase+mOther;
+  const mgmtLabel=d.mgmtOtherLabel?`管理費・修繕積立金・${d.mgmtOtherLabel}`:"管理費等";
+  const daysInMonth=new Date(sDate.getFullYear(),sDate.getMonth()+1,0).getDate();
+  let mBuy=0,bDyM=0,mDly=0,rDly=0,mgmtRows=[];
+  if(d.propType==="マンション"&&mTot>0){
+    bDyM=daysInMonth-sDate.getDate()+1;
+    mDly=Math.floor(mBase*(bDyM/daysInMonth));rDly=Math.floor(rBase*(bDyM/daysInMonth));
+    const curMonthEnd=new Date(sDate.getFullYear(),sDate.getMonth()+1,0);
+    const nm1Start=new Date(sDate.getFullYear(),sDate.getMonth()+1,1);
+    const nm1End=new Date(sDate.getFullYear(),sDate.getMonth()+2,0);
+    const nm2Start=new Date(sDate.getFullYear(),sDate.getMonth()+2,1);
+    const nm2End=new Date(sDate.getFullYear(),sDate.getMonth()+3,0);
+    mgmtRows.push({label:"当月　日割分",period:`${md(sDate)} ～ ${md(curMonthEnd)}`,days:`${bDyM}日`,mAmt:mDly,rAmt:rDly,oAmt:mOther>0?Math.floor(mOther*(bDyM/daysInMonth)):0});
+    mBuy=mDly+rDly+(mOther>0?Math.floor(mOther*(bDyM/daysInMonth)):0);
+    if(d.mgmtClearMonths==="翌月まで"||d.mgmtClearMonths==="翌々月まで"){mgmtRows.push({label:"翌月　1ヶ月分",period:`${md(nm1Start)} ～ ${md(nm1End)}`,days:"1ヶ月",mAmt:mBase,rAmt:rBase,oAmt:mOther});mBuy+=mTot;}
+    if(d.mgmtClearMonths==="翌々月まで"){mgmtRows.push({label:"翌々月　1ヶ月分",period:`${md(nm2Start)} ～ ${md(nm2End)}`,days:"1ヶ月",mAmt:mBase,rAmt:rBase,oAmt:mOther});mBuy+=mTot;}
+  }
+  let mgmtSellerLastMonth="";
+  if(d.propType==="マンション"){
+    const addMonth=d.mgmtClearMonths==="翌々月まで"?2:d.mgmtClearMonths==="翌月まで"?1:0;
+    const tgt=new Date(sDate.getFullYear(),sDate.getMonth()+addMonth,1);
+    mgmtSellerLastMonth=`令和${tgt.getFullYear()-2018}年${tgt.getMonth()+1}月`;
+  }
+  const reiwaBase=stYear-2018;
+  const taxSellerYearFull=d.overYear==="あり"?`令和${reiwaBase}年度・令和${reiwaBase+1}年度`:`令和${reiwaBase}年度`;
+  const reformTotal=Math.round(num(d.reformTotal));
+  const reformDeposit=d.reformDepositYN==="あり"?Math.round(num(d.reformDepositAmt)):0;
+  const reformBalance=Math.max(reformTotal-reformDeposit,0);
+  const incomeTot=fRem+tBuy+mBuy;
+  const loanBal=Math.round(num(d.loanBalance));
+  const sBroker=Math.round(num(d.sBrokerTotal))-Math.round(num(d.sBrokerPaid));
+  const sViViProxy=sBroker+Math.round(num(d.sProxy1))+Math.round(num(d.sProxy2))+Math.round(num(d.sProxy3))+Math.round(num(d.sProxy4))+Math.round(num(d.sProxy5))+Math.round(num(d.sProxy6));
+  const sCash=Math.round(num(d.sCashAmt1))+Math.round(num(d.sCashAmt2));
+  const aToS=incomeTot-sViViProxy;
+  const bBroker=Math.round(num(d.bBrokerTotal))-Math.round(num(d.bBrokerPaid));
+  const bViViProxy=bBroker+Math.round(num(d.bRegFee))+reformDeposit+Math.round(num(d.bOtherProxy));
+  const bBankDraw=Math.round(num(d.bLoanFee))+Math.round(num(d.bFireInsurance))+Math.round(num(d.bMgmtFund))+Math.round(num(d.bTransferFee))+Math.round(num(d.bOtherDraw))+reformBalance;
+  const bCash=Math.round(num(d.bCashAmt1))+Math.round(num(d.bCashAmt2));
+  const tExpB=incomeTot+bViViProxy+bBankDraw+bCash;
+  let selfFunds=0,surplus=0;
+  if(d.loanUse==="あり"){const diff=tExpB-Math.round(num(d.loanAmount));selfFunds=diff>0?diff:0;surplus=diff<0?Math.abs(diff):0;}
+  else{selfFunds=tExpB;}
+  const overLoan=aToS<loanBal&&loanBal>0;
+
+  // 振込先を設定から取得
+  const selectedBank=cfg?.bankAccounts?.find(b=>b.label===d.viviBank)||cfg?.bankAccounts?.[0];
+  const viviBank=selectedBank?`${selectedBank.bankName} ${selectedBank.bankBranch} ${selectedBank.bankType} №${selectedBank.bankNo}\n(名義) ${selectedBank.bankHolder}`:"（振込先未設定）";
+  const sellers=getSellers(d);
+  const sellerBank=`${d.sellerBankName} ${d.sellerBankType} ${d.sellerBankNo}\n(名義) ${d.sellerBankHolder} 様`;
+  return{fRem,rText,tBuy,tSel,tNextYear,tAnn,mBuy,mDly,rDly,mTot,mOther,bDyM,daysInMonth,mgmtRows,mgmtLabel,mgmtSellerLastMonth,taxSellerYearFull,
+    incomeTot,loanBal,sBroker,sViViProxy,sCash,aToS,bBroker,bViViProxy,bBankDraw,bCash,
+    tExpB,selfFunds,surplus,overLoan,shortfall:overLoan?loanBal-aToS:0,afterLoan:overLoan?0:aToS-loanBal,
+    reformDeposit,reformBalance,sellerDays,buyerDays,totalDays,startDate,endDate,sDate,
+    viviBank,sellerBank,taxLabel,stYear};
+}
+
+const DOC={
+  page:{background:"#fff",padding:"24px 28px",fontFamily:"'Meiryo UI','Meiryo','MS Gothic',sans-serif",fontSize:11,color:"#111",lineHeight:1.55},
+  header:{borderBottom:"3px double #1a3a6b",paddingBottom:8,marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"flex-end"},
+  logo:{fontSize:18,fontWeight:"bold",color:"#1a3a6b",letterSpacing:2},
+  logoSub:{fontSize:9,color:"#555",display:"block",letterSpacing:1},
+  docTitle:{fontSize:16,fontWeight:"bold",textAlign:"center",padding:"8px 0",borderTop:"2px solid #1a3a6b",borderBottom:"2px solid #1a3a6b",marginBottom:12,color:"#1a3a6b",letterSpacing:3},
+  addressee:{fontSize:14,fontWeight:"bold",borderBottom:"1px solid #333",paddingBottom:2,marginBottom:10,display:"inline-block"},
+  sectionHead:{background:"#1a3a6b",color:"#fff",padding:"3px 8px",fontSize:10,fontWeight:"bold",marginTop:10,marginBottom:3,letterSpacing:1},
+  sectionHeadRed:{background:"#8b0000",color:"#fff",padding:"3px 8px",fontSize:10,fontWeight:"bold",marginTop:10,marginBottom:3},
+  table:{width:"100%",borderCollapse:"collapse",fontSize:11,marginBottom:4,tableLayout:"fixed"},
+  td:{border:"1px solid #aaa",padding:"3px 6px",wordBreak:"break-all"},
+  tdRight:{border:"1px solid #aaa",padding:"3px 6px",textAlign:"right",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"},
+  tdHead:{border:"1px solid #aaa",padding:"3px 6px",background:"#dce6f1",fontWeight:"bold",textAlign:"center"},
+  warningBox:{border:"2px solid #8b0000",padding:"6px 10px",background:"#fff8f8",color:"#8b0000",fontSize:10,marginBottom:8,fontWeight:"bold"},
+  noteBox:{border:"1px solid #aaa",padding:"5px 8px",background:"#f9f9f9",fontSize:10,marginTop:6,color:"#333"},
+  infoBox:{border:"1px solid #1a3a6b",padding:"5px 8px",background:"#eef3fb",fontSize:10,marginTop:6,color:"#222"},
+  bankBox:{border:"1px solid #1a3a6b",padding:"5px 8px",background:"#eef3fb",fontSize:10,marginTop:2,marginBottom:4},
+  footer:{borderTop:"1px solid #aaa",marginTop:16,paddingTop:6,textAlign:"right",fontSize:9,color:"#555"},
+  stamp:{display:"inline-block",border:"2px solid #c00",borderRadius:4,padding:"1px 6px",color:"#c00",fontSize:10,fontWeight:"bold",marginLeft:8},
+};
+
+function DocHeader({d,cfg}){
+  const co=cfg||{};
+  return(
+    <div style={DOC.header}>
+      <div>
+        <div style={DOC.logo}>{co.companyName||"（会社名未設定）"}<span style={DOC.logoSub}>{co.companyNameEn||""}</span></div>
+        <div style={{fontSize:9,color:"#555",marginTop:2}}>TEL：{co.companyTel||""}　担当：{d.staff}</div>
+      </div>
+      <div style={{textAlign:"right",fontSize:9,color:"#555"}}>
+        <div>決済日：{jDate(d.settlementDT)}</div>
+        <div>物件：{d.propType}　{d.addressZip?`〒${d.addressZip.slice(0,3)}-${d.addressZip.slice(3)} `:""}{d.address}</div>
+      </div>
+    </div>
+  );
+}
+
+function TRow({label,value,bold,indent,sub,total,warn,colSpan,wrap}){
+  const bg=total?"#1a3a6b":warn?"#fff0f0":"transparent";
+  const col=total?"#fff":warn?"#8b0000":"#111";
+  return(
+    <tr style={{background:bg,color:col}}>
+      {colSpan?(
+        <td style={{...DOC.td,fontWeight:bold||total?"bold":"normal",color:col}} colSpan={colSpan}>{indent?"　":""}{label}</td>
+      ):(
+        <>
+          <td style={{...DOC.td,fontWeight:bold||total?"bold":"normal",color:col,paddingLeft:indent?16:6,fontSize:sub?10:11}}>{label}</td>
+          <td style={{...DOC.tdRight,fontWeight:bold||total?"bold":"normal",color:col,whiteSpace:wrap?"normal":"nowrap",wordBreak:wrap?"break-all":"normal"}}>{value}</td>
+        </>
+      )}
+    </tr>
+  );
+}
+
+function SellerSignBlock({d,cfg}){
+  const co=cfg||{};
+  const sellers=getSellers(d);
+  return(
+    <div style={{marginTop:16,borderTop:"1px solid #aaa",paddingTop:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+        <div style={{fontSize:10}}>
+          {sellers.map((s,i)=>(
+            <div key={i} style={{marginBottom:6}}>
+              <div style={{fontWeight:"bold"}}>{sellers.length>1?`売主${i+1}　`:""}{s.name}</div>
+              {s.addr&&<div style={{fontSize:9,color:"#555"}}>{s.addr}</div>}
+            </div>
+          ))}
+        </div>
+        <div style={{textAlign:"right",fontSize:10}}>
+          <div style={{fontWeight:"bold"}}>{co.companyName||""}</div>
+          <div>{co.companyAddress||""}</div>
+          <div>TEL：{co.companyTel||""}</div>
+          <div>担当：{d.staff}　<span style={DOC.stamp}>印</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DisclaimerBox({cfg}){
+  if(!cfg?.showDisclaimer)return null;
+  return(
+    <div style={{border:"1px dashed #aaa",padding:"4px 8px",background:"#fafafa",fontSize:9,color:"#888",marginTop:6}}>
+      ※本ツールの計算結果は参考値です。最終的な金額は必ず専門家にご確認ください。
+    </div>
+  );
+}
+
+function SellerGuide({d,c,cfg}){
+  const co=cfg||{};
+  const sellers=getSellers(d);
+  const isTochi=d.propType==="土地";
+  const hasProxy=c.sViViProxy>0;
+  const shihoName=d.shihoShoshi==="その他"?d.shihoShoshiOther:d.shihoShoshi;
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={DOC.docTitle}>残金決済のご案内（売主様）</div>
+      <div style={{marginBottom:10}}>{sellers.map((s,i)=><span key={i} style={{...DOC.addressee,marginRight:12}}>{s.name} 様</span>)}</div>
+      {c.overLoan&&<div style={DOC.warningBox}>⚠ オーバーローン：売主様の住宅ローン残債 {yen(c.loanBal)} に対して、売主様受取額（C）が {yen(c.aToS)} となり、{yen(c.shortfall)} の持ち出しが必要になります。別途ご相談ください。</div>}
+      <div style={DOC.sectionHead}>■ 決済の流れ・日程</div>
+      <table style={DOC.table}><colgroup><col style={{width:"30%"}}/><col style={{width:"70%"}}/></colgroup>
+        <tbody>
+          {d.mendan==="あり"&&<TRow label="📋 本人面談" value={`${jDate(d.mendanDT)} ${d.mendanTime}${d.mendanPlace?`　@${d.mendanPlace}`:""}`} bold/>}
+          <TRow label={d.gathering==="あり"?"🏦 残金決済（集合）":"💳 残金決済（振込）"} value={`${jDate(d.settlementDT)} ${d.settlementTime}${d.gathering==="あり"&&d.gatheringPlace?`　@${d.gatheringPlace}`:""}`} bold/>
+          {shihoName&&<TRow label="🖊 担当司法書士" value={shihoName}/>}
+        </tbody>
+      </table>
+      <div style={DOC.sectionHead}>■ お受け取り金額（C）</div>
+      <table style={DOC.table}><colgroup><col style={{width:"60%"}}/><col style={{width:"40%"}}/></colgroup>
+        <tbody>
+          <TRow label="売買残代金" value={yen(c.fRem)}/>
+          {c.tBuy>0&&<TRow label={`${c.taxLabel}清算金（買主様よりご負担）`} value={yen(c.tBuy)}/>}
+          {c.mBuy>0&&<TRow label={`${c.mgmtLabel}清算金（買主様よりご負担）`} value={yen(c.mBuy)}/>}
+          <TRow label="収入合計" value={yen(c.incomeTot)} bold total/>
+          {c.sBroker>0&&<TRow label={`仲介手数料（残額）`} value={`△ ${yen(c.sBroker)}`} warn/>}
+          {num(d.sProxy2)>0&&<TRow label="【代行】抵当権抹消費用" value={`△ ${yen(d.sProxy2)}`} indent sub/>}
+          {num(d.sProxy1)>0&&<TRow label="【代行】建物滅失・表示変更" value={`△ ${yen(d.sProxy1)}`} indent sub/>}
+          {num(d.sProxy3)>0&&<TRow label="【代行】測量費用" value={`△ ${yen(d.sProxy3)}`} indent sub/>}
+          {num(d.sProxy4)>0&&<TRow label="【代行】建物解体費" value={`△ ${yen(d.sProxy4)}`} indent sub/>}
+          {num(d.sProxy5)>0&&<TRow label="【代行】荷物片づけ" value={`△ ${yen(d.sProxy5)}`} indent sub/>}
+          {num(d.sProxy6)>0&&<TRow label="【代行】その他経費" value={`△ ${yen(d.sProxy6)}`} indent sub/>}
+          <TRow label="★ 売主様お受取額 (C)" value={yen(c.aToS)} bold total warn={c.overLoan}/>
+          {c.loanBal>0&&<TRow label={`ローン残債（概算）`} value={`△ ${yen(c.loanBal)}`} warn={c.overLoan}/>}
+          {!c.overLoan&&c.loanBal>0&&<TRow label="手元に残る概算額" value={yen(c.afterLoan)} bold/>}
+        </tbody>
+      </table>
+      {c.rText&&<div style={{...DOC.noteBox,marginTop:4}}><strong>【実測清算 備考】</strong><br/>{c.rText}</div>}
+      <div style={DOC.sectionHead}>■ ご入金先（売主様の口座）</div>
+      <div style={DOC.bankBox}><div style={{whiteSpace:"pre-line"}}>{c.sellerBank}</div></div>
+      {hasProxy&&<><div style={DOC.sectionHead}>■ 代行費等のお振込先（{co.companyName||"当社"}）</div>
+      <div style={DOC.bankBox}><div style={{whiteSpace:"pre-line"}}>{c.viviBank}</div></div></>}
+      <div style={DOC.sectionHead}>■ 売主様のご準備物</div>
+      <table style={DOC.table}><colgroup><col style={{width:"55%"}}/><col style={{width:"45%"}}/></colgroup>
+        <tbody>
+          <TRow label="登記識別情報通知（権利証）" value={`${d.sKenriCount} 通`}/>
+          <TRow label="住民票（現住所記載）" value={`${d.sJuminCount} 通`}/>
+          {d.sKosekiHuhyo==="表示"&&<TRow label="戸籍の附票の写し" value="1 通（住所変更履歴）"/>}
+          <TRow label="印鑑証明書" value={`${d.sInkanCount} 通`}/>
+          {d.showInkanWarning==="表示"&&<tr><td colSpan={2} style={{...DOC.td,fontSize:9,color:"#8b0000",background:"#fff8f8"}}>※印鑑証明書は発行後 <strong>3ヶ月以内</strong> のものをご用意ください。</td></tr>}
+          <TRow label="実印" value="必須"/>
+          {num(d.sCashAmt1)>0&&<TRow label={d.sCashLabel1||"現金①"} value={yen(d.sCashAmt1)}/>}
+          {num(d.sCashAmt2)>0&&<TRow label={d.sCashLabel2||"現金②"} value={yen(d.sCashAmt2)}/>}
+          {d.sExtraLabel1&&<TRow label={d.sExtraLabel1} value="ご準備ください"/>}
+          {d.sExtraLabel2&&<TRow label={d.sExtraLabel2} value="ご準備ください"/>}
+          {d.sExtraLabel3&&<TRow label={d.sExtraLabel3} value="ご準備ください"/>}
+        </tbody>
+      </table>
+      <div style={DOC.sectionHead}>■ {c.taxLabel}について</div>
+      <div style={DOC.noteBox}>
+        {c.taxSellerYearFull}分の{c.taxLabel}（年額 {yen(c.tAnn)}）について、引渡日（{jDate(d.settlementDT)}）を基準に日割精算いたします。<br/>
+        売主様負担：{c.sellerDays}日分　{yen(c.tSel)}　／　買主様負担：{c.buyerDays}日分　{yen(c.tBuy)}（起算日：{d.taxBase}）
+      </div>
+      {d.propType==="マンション"&&c.mBuy>0&&<>
+        <div style={DOC.sectionHead}>■ {c.mgmtLabel}について</div>
+        <div style={DOC.noteBox}>売主様は {mgmtSellerLastMonth||""}月分まで管理費等をご負担いただきます。</div>
+      </>}
+      <DisclaimerBox cfg={cfg}/>
+      <SellerSignBlock d={d} cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+function BuyerGuide({d,c,cfg}){
+  const co=cfg||{};
+  const buyers=getBuyers(d);
+  const isLoan=d.loanUse==="あり";
+  const isTochi=d.propType==="土地";
+  const shihoName=d.shihoShoshi==="その他"?d.shihoShoshiOther:d.shihoShoshi;
+  // インフラ連絡先
+  const infraLines=[];
+  if(co.infraElecName)infraLines.push(`電　気：${co.infraElecName}${co.infraElecTel?` (${co.infraElecTel})`:""}`);
+  if(co.infraWaterName)infraLines.push(`水　道：${co.infraWaterName}${co.infraWaterTel?` (${co.infraWaterTel})`:""}`);
+  if(co.infraGasName)infraLines.push(`ガ　ス：${co.infraGasName}${co.infraGasTel?` (${co.infraGasTel})`:""}`);
+  infraLines.push("電　話：各通信会社へご連絡ください");
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={DOC.docTitle}>残金決済のご案内（買主様）</div>
+      <div style={{marginBottom:10}}>{buyers.map((b,i)=><span key={i} style={{...DOC.addressee,marginRight:12}}>{b.name} 様</span>)}</div>
+      <div style={DOC.sectionHead}>■ 決済の流れ・日程</div>
+      <table style={DOC.table}><colgroup><col style={{width:"30%"}}/><col style={{width:"70%"}}/></colgroup>
+        <tbody>
+          {isLoan&&<TRow label="🏦 金消契約" value={`${jDate(d.kinshoDT)} ${d.kinshoTime}${d.kinshoPlace?`　@${d.kinshoPlace}`:""}`} bold/>}
+          {d.bMendan==="あり"&&!(d.gathering==="なし"&&isLoan&&d.bMendanTiming==="金消契約時に併せて実施")&&
+            <TRow label="📋 本人面談" value={`${jDate(d.bMendanDT)} ${d.bMendanTime}${d.bMendanPlace?`　@${d.bMendanPlace}`:""}`} bold/>}
+          <TRow label={d.gathering==="あり"?"🏦 残金決済（集合）":"💳 残金決済（振込）"} value={`${jDate(d.settlementDT)} ${d.settlementTime}${d.gathering==="あり"&&d.gatheringPlace?`　@${d.gatheringPlace}`:""}`} bold/>
+          {shihoName&&<TRow label="🖊 担当司法書士" value={shihoName}/>}
+        </tbody>
+      </table>
+      <div style={DOC.sectionHead}>■ 必要資金の内訳</div>
+      <table style={DOC.table}><colgroup><col style={{width:"5%"}}/><col style={{width:"60%"}}/><col style={{width:"35%"}}/></colgroup>
+        <thead><tr><th style={{...DOC.tdHead,fontSize:9}}>区分</th><th style={DOC.tdHead}>項　目</th><th style={DOC.tdHead}>金　額</th></tr></thead>
+        <tbody>
+          <tr><td style={{...DOC.td,textAlign:"center",background:"#dce6f1",fontWeight:"bold",fontSize:11,color:"#1a3a6b"}}>①</td><td style={DOC.td}>売買残代金</td><td style={DOC.tdRight}>{yen(c.fRem)}</td></tr>
+          {c.tBuy>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#dce6f1",fontWeight:"bold",fontSize:11,color:"#1a3a6b"}}>①</td><td style={DOC.td}>{c.taxLabel}清算金</td><td style={DOC.tdRight}>{yen(c.tBuy)}</td></tr>}
+          {c.mBuy>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#dce6f1",fontWeight:"bold",fontSize:11,color:"#1a3a6b"}}>①</td><td style={DOC.td}>{c.mgmtLabel}清算金</td><td style={DOC.tdRight}>{yen(c.mBuy)}</td></tr>}
+          {c.bBroker>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#e8d8f5",fontWeight:"bold",fontSize:11,color:"#5a1a8b"}}>②</td><td style={DOC.td}>仲介手数料（残額）</td><td style={DOC.tdRight}>{yen(c.bBroker)}</td></tr>}
+          {num(d.bRegFee)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#e8d8f5",fontWeight:"bold",fontSize:11,color:"#5a1a8b"}}>②</td><td style={DOC.td}>登記費用</td><td style={DOC.tdRight}>{yen(d.bRegFee)}</td></tr>}
+          {c.reformDeposit>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#e8d8f5",fontWeight:"bold",fontSize:11,color:"#5a1a8b"}}>②</td><td style={DOC.td}>リフォーム代（決済時手付）</td><td style={DOC.tdRight}>{yen(c.reformDeposit)}</td></tr>}
+          {num(d.bOtherProxy)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#e8d8f5",fontWeight:"bold",fontSize:11,color:"#5a1a8b"}}>②</td><td style={DOC.td}>その他代行費用</td><td style={DOC.tdRight}>{yen(d.bOtherProxy)}</td></tr>}
+          {c.reformBalance>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>リフォーム代（完成後支払い）</td><td style={DOC.tdRight}>{yen(c.reformBalance)}</td></tr>}
+          {num(d.bLoanFee)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>ローン諸費用（引落）</td><td style={DOC.tdRight}>{yen(d.bLoanFee)}</td></tr>}
+          {num(d.bFireInsurance)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>火災保険料（引落）</td><td style={DOC.tdRight}>{yen(d.bFireInsurance)}</td></tr>}
+          {num(d.bMgmtFund)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>管理基金等（引落）</td><td style={DOC.tdRight}>{yen(d.bMgmtFund)}</td></tr>}
+          {num(d.bTransferFee)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>振込手数料</td><td style={DOC.tdRight}>{yen(d.bTransferFee)}</td></tr>}
+          {num(d.bOtherDraw)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={DOC.td}>その他（引落・後日払）</td><td style={DOC.tdRight}>{yen(d.bOtherDraw)}</td></tr>}
+          {num(d.bCashAmt1)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#d8f5e0",fontWeight:"bold",fontSize:11,color:"#1a6b3a"}}>③</td><td style={DOC.td}>{d.bCashLabel1}</td><td style={DOC.tdRight}>{yen(d.bCashAmt1)}</td></tr>}
+          {num(d.bCashAmt2)>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#d8f5e0",fontWeight:"bold",fontSize:11,color:"#1a6b3a"}}>③</td><td style={DOC.td}>{d.bCashLabel2}</td><td style={DOC.tdRight}>{yen(d.bCashAmt2)}</td></tr>}
+          <tr style={{background:"#1a3a6b",color:"#fff"}}><td style={{...DOC.td,color:"#fff"}} colSpan={2}><span style={{fontWeight:"bold",fontSize:12}}>必要資金総額 (A)</span></td><td style={{...DOC.tdRight,fontWeight:"bold",fontSize:12,color:"#fff"}}>{yen(c.tExpB)}</td></tr>
+          {isLoan&&<tr><td style={{...DOC.td}} colSpan={2}><span style={{fontWeight:"bold"}}>ローン融資額 (B)</span></td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{yen(d.loanAmount)}</td></tr>}
+          <tr style={{background:"#1a3a6b",color:"#fff"}}><td style={{...DOC.td,color:"#fff"}} colSpan={2}><span style={{fontWeight:"bold",fontSize:12}}>★ 自己資金ご準備額 (A − B)</span></td><td style={{...DOC.tdRight,fontWeight:"bold",fontSize:12,color:"#fff"}}>{yen(c.selfFunds)}</td></tr>
+          {c.surplus>0&&<tr style={{background:"#e8fde8"}}><td style={{...DOC.td,fontWeight:"bold",color:"#1a6b1a"}} colSpan={2}>☆ お手元に残る金額 (B − A)</td><td style={{...DOC.tdRight,fontWeight:"bold",color:"#1a6b1a"}}>{yen(c.surplus)}</td></tr>}
+        </tbody>
+      </table>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"4px 0 6px",fontSize:10}}>
+        {[["①","#dce6f1","#1a3a6b","売主様へのお振込"],["②","#e8d8f5","#5a1a8b",`${co.companyName||"当社"}へのお振込`],["③","#d8f5e0","#1a6b3a","当日現金ご準備"],["④","#fde8cc","#8b5000","銀行引落・後日支払等"]].map(([no,bg,col,lbl])=>(
+          <span key={no} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 7px",borderRadius:4,background:bg,border:`1px solid ${col}`}}>
+            <span style={{fontWeight:"bold",color:col,fontSize:12}}>{no}</span>
+            <span style={{color:"#333"}}>{lbl}</span>
+          </span>
+        ))}
+      </div>
+      {c.rText&&<div style={{...DOC.noteBox,marginTop:4}}><strong>【実測清算 備考】</strong><br/>{c.rText}</div>}
+      <div style={DOC.sectionHead}>■ お振込先・お支払い方法の内訳</div>
+      <table style={DOC.table}><colgroup><col style={{width:"5%"}}/><col style={{width:"60%"}}/><col style={{width:"35%"}}/></colgroup>
+        <thead><tr><th style={{...DOC.tdHead,fontSize:9}}>区分</th><th style={DOC.tdHead}>お振込先・方法</th><th style={DOC.tdHead}>金　額</th></tr></thead>
+        <tbody>
+          <tr><td style={{...DOC.td,textAlign:"center",background:"#dce6f1",fontWeight:"bold",fontSize:11,color:"#1a3a6b"}}>①</td><td style={{...DOC.td,fontWeight:"bold"}}>売主様へのお振込</td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{yen(c.aToS)}</td></tr>
+          <tr><td style={{...DOC.td,textAlign:"center",background:"#e8d8f5",fontWeight:"bold",fontSize:11,color:"#5a1a8b"}}>②</td><td style={{...DOC.td,fontWeight:"bold"}}>{co.companyName||"当社"}へのお振込</td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{yen(c.sViViProxy+c.bViViProxy)}</td></tr>
+          {c.bCash>0&&<tr><td style={{...DOC.td,textAlign:"center",background:"#d8f5e0",fontWeight:"bold",fontSize:11,color:"#1a6b3a"}}>③</td><td style={{...DOC.td,fontWeight:"bold"}}>当日現金ご準備</td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{yen(c.bCash)}</td></tr>}
+          <tr><td style={{...DOC.td,textAlign:"center",background:"#fde8cc",fontWeight:"bold",fontSize:11,color:"#8b5000"}}>④</td><td style={{...DOC.td,fontWeight:"bold"}}>銀行引落・後日支払等<span style={{fontSize:9,fontWeight:"normal",marginLeft:4,color:"#888"}}>自動引落または後日直接お支払い</span></td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{yen(c.bBankDraw)}</td></tr>
+        </tbody>
+      </table>
+      <div style={DOC.bankBox}>
+        <div style={{fontWeight:"bold",marginBottom:2,color:"#1a3a6b",fontSize:10}}>【① 売主様へのお振込先】</div>
+        <div style={{whiteSpace:"pre-line",marginBottom:4}}>{c.sellerBank}</div>
+        <div style={{fontWeight:"bold",marginBottom:2,color:"#1a3a6b",fontSize:10}}>【② {co.companyName||"当社"}へのお振込先】</div>
+        <div style={{whiteSpace:"pre-line",marginBottom:4}}>{c.viviBank}</div>
+        <div style={{fontSize:10,color:"#555",borderTop:"1px dashed #aaa",paddingTop:4}}>※当社にお振込みいただく場合は振込手数料は差し引いていただいて結構です。</div>
+      </div>
+      <div style={DOC.sectionHead}>▼ 不動産取得税について</div>
+      <div style={DOC.infoBox}>
+        ご購入の<strong>４～６ヵ月後</strong>に県税事務所より納税通知が届きますので、納付手続きもしくは、該当する方は軽減措置の申告手続きを実施してください。
+        {isTochi&&<div style={{marginTop:4}}>尚、取得後<strong>3年以内</strong>に一定の居住用建物を建築し居住の用に供すれば、不動産取得税は一定額還付されます。詳細は、県税事務所までお問い合わせください。</div>}
+      </div>
+      {infraLines.length>0&&<>
+        <div style={DOC.sectionHead}>■ インフラのお手続きについて</div>
+        <div style={DOC.noteBox}>お引渡し日以降、各事業者へ利用開始のご連絡をお願いいたします。<br/>{infraLines.join("　")}</div>
+      </>}
+      {d.propType==="マンション"&&<div style={{...DOC.noteBox,marginTop:6,borderLeft:"3px solid #1a3a6b"}}><span style={{fontWeight:"bold",color:"#1a3a6b"}}>【マンション管理組合へのご連絡】</span><br/>お引っ越し日が決まりましたら、遅くとも<span style={{fontWeight:"bold"}}>1週間前まで</span>に管理会社または管理組合へご連絡ください。</div>}
+      <DisclaimerBox cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+function Receipt({d,c,cfg}){
+  const co=cfg||{};
+  const pWord=d.propType==="マンション"?"マンション":d.propType==="土地"?"土地":"土地建物";
+  const zipDisp=d.addressZip?`〒${d.addressZip.slice(0,3)}-${d.addressZip.slice(3)} `:"";
+  const buyers=getBuyers(d);
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={DOC.docTitle}>領　　収　　書</div>
+      <div style={{marginBottom:14}}>{buyers.map((b,i)=><span key={i} style={{...DOC.addressee,marginRight:12}}>{b.name} 様</span>)}</div>
+      <div style={{textAlign:"center",fontSize:24,fontWeight:"bold",padding:"14px 0",border:"2px solid #1a3a6b",marginBottom:14,background:"#f5f8ff",letterSpacing:2}}>金　{fmt(c.fRem)} 円</div>
+      <table style={DOC.table}><colgroup><col style={{width:"25%"}}/><col style={{width:"75%"}}/></colgroup>
+        <tbody>
+          <TRow label="但　し" value={`${zipDisp}${d.address} の${pWord}売買代金の残代金として`} wrap/>
+          <TRow label="領収日" value={jDate(d.settlementDT)}/>
+        </tbody>
+      </table>
+      <div style={{fontSize:11,margin:"6px 0 18px"}}>上記正に領収致しました。</div>
+      <SellerSignBlock d={d} cfg={cfg}/>
+      <DisclaimerBox cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+function TaxDoc({d,c,cfg}){
+  const co=cfg||{};
+  const curYearEnd=new Date(c.endDate.getTime()-86400000);
+  const nextYearEnd=new Date(c.endDate.getFullYear()+1,c.endDate.getMonth(),c.endDate.getDate()-1);
+  const nextYearStart=c.endDate;
+  const nextYearDays=Math.round((new Date(nextYearStart.getFullYear()+1,nextYearStart.getMonth(),nextYearStart.getDate())-nextYearStart)/86400000);
+  const buyers=getBuyers(d);
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={DOC.docTitle}>{c.taxLabel}　清算金領収書</div>
+      <div style={{marginBottom:10}}>{buyers.map((b,i)=><span key={i} style={{...DOC.addressee,marginRight:12}}>{b.name} 様</span>)}</div>
+      <div style={{textAlign:"center",fontSize:22,fontWeight:"bold",padding:"12px 0",border:"2px solid #1a3a6b",marginBottom:12,background:"#f5f8ff"}}>金　{fmt(c.tBuy)} 円</div>
+      <table style={DOC.table}><colgroup><col style={{width:"25%"}}/><col style={{width:"75%"}}/></colgroup>
+        <tbody>
+          <TRow label="但　し" value={`${d.address} にかかる${c.taxLabel}の清算金として`} wrap/>
+          <TRow label="領収日" value={jDate(d.settlementDT)}/>
+        </tbody>
+      </table>
+      <div style={{fontSize:10,margin:"5px 0 12px"}}>上記正に領収致しました。</div>
+      <div style={DOC.sectionHead}>■ 清算金　計算内訳</div>
+      <div style={{fontSize:9,color:"#555",marginBottom:4}}>※引渡日（{jDate(d.settlementDT)}）より買主様のご負担となります。起算日：{d.taxBase}　年間日数：{c.totalDays}日（{c.totalDays===366?"うるう年":"平年"}）　端数処理：{d.taxRounding}</div>
+      <table style={DOC.table}><colgroup><col style={{width:"28%"}}/><col style={{width:"24%"}}/><col style={{width:"16%"}}/><col style={{width:"16%"}}/><col style={{width:"16%"}}/></colgroup>
+        <thead><tr>{["項　目","対象期間","負担日数","税額（年額）","清算金額"].map(h=><th key={h} style={DOC.tdHead}>{h}</th>)}</tr></thead>
+        <tbody>
+          <tr><td style={DOC.td}>当年度　日割分</td><td style={{...DOC.td,textAlign:"center"}}>{md(c.sDate)} ～ {md(curYearEnd)}</td><td style={DOC.tdRight}>{c.buyerDays}日</td><td style={DOC.tdRight}>{fmt(c.tAnn)}円</td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{fmt(c.tAnn-c.tSel)}円</td></tr>
+          {c.tNextYear>0&&<><tr><td style={DOC.td}>翌年度　1年分</td><td style={{...DOC.td,textAlign:"center"}}>{md(c.endDate)} ～ {md(nextYearEnd)}</td><td style={DOC.tdRight}>{nextYearDays}日</td><td style={DOC.tdRight}>{fmt(c.tNextYear)}円</td><td style={{...DOC.tdRight,fontWeight:"bold"}}>{fmt(c.tNextYear)}円</td></tr><tr><td colSpan={5} style={{...DOC.td,fontSize:9,color:"#555"}}>※翌年度分(1年分)も事前の取り決めにより併せて清算しております。</td></tr></>}
+          <tr style={{background:"#1a3a6b",color:"#fff",fontWeight:"bold"}}><td style={{...DOC.td,color:"#fff"}} colSpan={4}>合　計</td><td style={{...DOC.tdRight,color:"#fff",fontWeight:"bold"}}>{fmt(c.tBuy)}円</td></tr>
+        </tbody>
+      </table>
+      <SellerSignBlock d={d} cfg={cfg}/>
+      <DisclaimerBox cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+function MgmtDoc({d,c,cfg}){
+  const co=cfg||{};
+  const buyers=getBuyers(d);
+  if(d.propType!=="マンション")return<div style={{...DOC.page,color:"#888"}}>※戸建・土地のため出力されません。</div>;
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={DOC.docTitle}>{c.mgmtLabel}　清算金領収書</div>
+      <div style={{marginBottom:10}}>{buyers.map((b,i)=><span key={i} style={{...DOC.addressee,marginRight:12}}>{b.name} 様</span>)}</div>
+      <div style={{textAlign:"center",fontSize:22,fontWeight:"bold",padding:"12px 0",border:"2px solid #1a3a6b",marginBottom:12,background:"#f5f8ff"}}>金　{fmt(c.mBuy)} 円</div>
+      <table style={DOC.table}><colgroup><col style={{width:"25%"}}/><col style={{width:"75%"}}/></colgroup>
+        <tbody>
+          <TRow label="但　し" value={`${d.address} にかかる${c.mgmtLabel}の清算金として`} wrap/>
+          <TRow label="領収日" value={jDate(d.settlementDT)}/>
+        </tbody>
+      </table>
+      <div style={{fontSize:10,margin:"5px 0 12px"}}>上記正に領収致しました。</div>
+      <div style={DOC.sectionHead}>■ 清算金　計算内訳（清算範囲：{d.mgmtClearMonths}）</div>
+      <div style={{fontSize:9,color:"#555",marginBottom:4}}>※引渡日（{jDate(d.settlementDT)}）より買主様のご負担となります。</div>
+      <table style={{...DOC.table}}><colgroup><col style={{width:"18%"}}/><col style={{width:"18%"}}/><col style={{width:"10%"}}/><col style={{width:"18%"}}/><col style={{width:"18%"}}/>{c.mOther>0&&<col style={{width:"18%"}}/>}</colgroup>
+        <thead><tr>{["項　目","対象期間","日数/月数","管理費","修繕積立金",...(c.mOther>0?[d.mgmtOtherLabel||"その他"]:[])].map(h=><th key={h} style={DOC.tdHead}>{h}</th>)}</tr></thead>
+        <tbody>
+          {c.mgmtRows.map((row,i)=>(
+            <tr key={i} style={{background:i%2===0?"#fff":"#f5f8ff"}}>
+              <td style={{...DOC.td,fontWeight:"bold"}}>{row.label}</td>
+              <td style={{...DOC.td,textAlign:"center"}}>{row.period}</td>
+              <td style={DOC.tdRight}>{row.days}</td>
+              <td style={DOC.tdRight}>{fmt(row.mAmt)}円</td>
+              <td style={DOC.tdRight}>{fmt(row.rAmt)}円</td>
+              {c.mOther>0&&<td style={DOC.tdRight}>{fmt(row.oAmt||0)}円</td>}
+            </tr>
+          ))}
+          <tr style={{background:"#1a3a6b",color:"#fff",fontWeight:"bold"}}><td style={{...DOC.td,color:"#fff"}} colSpan={3}>合　計</td><td style={{...DOC.tdRight,color:"#fff"}}>{fmt(c.mgmtRows.reduce((s,r)=>s+r.mAmt,0))}円</td><td style={{...DOC.tdRight,color:"#fff"}}>{fmt(c.mgmtRows.reduce((s,r)=>s+r.rAmt,0))}円</td>{c.mOther>0&&<td style={{...DOC.tdRight,color:"#fff"}}>{fmt(c.mgmtRows.reduce((s,r)=>s+(r.oAmt||0),0))}円</td>}</tr>
+          <tr style={{background:"#1a3a6b",color:"#fff",fontWeight:"bold"}}><td style={{...DOC.td,color:"#fff"}} colSpan={4}>清算金　総合計</td><td style={{...DOC.tdRight,color:"#fff",fontSize:13}} colSpan={2}>{fmt(c.mBuy)}円</td></tr>
+        </tbody>
+      </table>
+      <SellerSignBlock d={d} cfg={cfg}/>
+      <DisclaimerBox cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+function CoverageMemo({d,c,cfg}){
+  const co=cfg||{};
+  const sellers=getSellers(d);
+  const buyers=getBuyers(d);
+  const hasJissoku=num(d.unitPrice)>0&&num(d.actualArea)>0&&num(d.officialArea)>0;
+  const uPrice=num(d.unitPrice);
+  const aArea=num(d.actualArea);
+  const oArea=num(d.officialArea);
+  const diff=Math.round((aArea-oArea)*100)/100;
+  const newTotal=hasJissoku?Math.floor(uPrice*aArea):0;
+  const fRem=newTotal-Math.round(num(d.deposit));
+
+  // 物件種別に応じて条項番号を選択（土地は土地用、戸建はtatemono用）
+  const isTochi=d.propType==="土地";
+  const prefix=isTochi?"memo_tochi":"memo_tatemono";
+  // 〇:売買目的物と代金 △:測量図・境界 □:支払時期・方法 ☆:清算
+  const artA=co[`${prefix}ArticleA`]||"1";  // 〇
+  const artB=co[`${prefix}ArticleB`]||"3";  // △
+  const artC=co[`${prefix}ArticleC`]||"5";  // □
+  const artD=co[`${prefix}ArticleD`]||"6";  // ☆
+
+  const kanji=n=>{const map={"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十","11":"十一","12":"十二","13":"十三","14":"十四","15":"十五"};return map[String(n)]||String(n);};
+
+  const signBlock=(label,name,addr,i)=>(
+    <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,pageBreakInside:"avoid",flexWrap:"wrap"}}>
+      <span style={{fontSize:10,fontWeight:"bold",color:"#1a3a6b",minWidth:50,borderLeft:"3px solid #1a3a6b",paddingLeft:4}}>《{label}》</span>
+      {addr&&<span style={{fontSize:10,color:"#333",borderBottom:"1px solid #aaa",padding:"1px 4px",minWidth:120,flex:2}}>住所　{addr}</span>}
+      <span style={{fontSize:10,borderBottom:"1px solid #aaa",padding:"1px 4px",minWidth:80,flex:1}}>氏名　{name}</span>
+      <span style={{...DOC.stamp,fontSize:9,padding:"0px 4px"}}>印</span>
+    </div>
+  );
+  return(
+    <div style={DOC.page}>
+      <DocHeader d={d} cfg={cfg}/>
+      <div style={{...DOC.docTitle,letterSpacing:6}}>覚　　書</div>
+      {!hasJissoku&&<div style={{...DOC.warningBox,textAlign:"center"}}>⚠ 実測清算の入力（平米単価・公簿面積・実測面積）が必要です</div>}
+      <div style={{fontSize:11,lineHeight:2,marginBottom:12}}>
+        売主<strong>{sellers.map(s=>s.name).join("および")}</strong>および買主<strong>{buyers.map(b=>b.name).join("および")}</strong>は、両者間で締結された<strong>{toReiwa(d.contractDate)}</strong>付不動産売買契約書（以下「本契約書」という。）第{kanji(artB)}条、第{kanji(artD)}条規定の事項に関し、本日下記の事項を確認した。
+      </div>
+      <div style={{textAlign:"center",fontSize:13,fontWeight:"bold",letterSpacing:4,marginBottom:12}}>記</div>
+      <div style={{fontSize:11,lineHeight:2}}>
+        <p style={{marginBottom:6}}><strong>１．</strong>売買土地の実測面積は、本契約書第{kanji(artB)}条規定の実測の結果、次のとおり確定した。</p>
+        <div style={{border:"1px solid #aaa",borderRadius:4,padding:"8px 16px",marginBottom:12,background:"#f9f9f9",textAlign:"center"}}>
+          <div style={{fontSize:15,fontWeight:"bold"}}>{hasJissoku?`${aArea.toFixed(2)} ㎡`:"　　　．　　　㎡"}</div>
+          <div style={{fontSize:10,color:"#555"}}>{hasJissoku?`（契約書面積より ${Math.abs(diff).toFixed(2)} ㎡ ${diff>=0?"増":"減"}）`:"（契約書面積より　　　㎡増または減）"}</div>
+        </div>
+        <p style={{marginBottom:6}}><strong>２．</strong>本契約書第{kanji(artA)}条規定の売買代金は、前項の確定面積に基づき、本契約書第{kanji(artD)}条の規定により残代金支払時に、次のとおり清算するものとする。</p>
+        <div style={{border:"1px solid #aaa",borderRadius:4,padding:"8px 16px",marginBottom:12,background:"#f9f9f9",textAlign:"center",fontSize:11}}>
+          {hasJissoku?<span><strong>{aArea.toFixed(2)}㎡</strong> × 標記単価（{fmt(uPrice)}円） ＝ <strong>{fmt(newTotal)}円</strong>　… ①</span>:<span>　　　㎡ × 標記単価（　　　円） ＝ 　　　円 … ①</span>}
+        </div>
+        <p style={{marginBottom:6}}><strong>３．</strong>本契約書第{kanji(artC)}条および第{kanji(artD)}条に定める残代金の金額は、次の通りとする。</p>
+        <div style={{border:"1px solid #aaa",borderRadius:4,padding:"8px 16px",marginBottom:12,background:"#f9f9f9"}}>
+          {hasJissoku?(
+            <div style={{fontSize:11}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span>確定売買金額①</span><span style={{fontWeight:"bold"}}>{fmt(newTotal)} 円</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span>手付金</span><span>△ {fmt(Math.round(num(d.deposit)))} 円</span></div>
+              <div style={{borderTop:"1px solid #aaa",paddingTop:6,display:"flex",justifyContent:"space-between",fontWeight:"bold",fontSize:13}}><span>残代金</span><span>{fmt(fRem)} 円</span></div>
+            </div>
+          ):<div style={{fontSize:11,color:"#888",textAlign:"center"}}>確定売買金額① 　　　円 ー 手付金 　　　円 ＝ 金 　　　円</div>}
+        </div>
+      </div>
+      <div style={{fontSize:10,lineHeight:2,marginBottom:12}}>上記の確認を証するため本書２通を作成し、売主および買主は、各々１通を保有する。</div>
+      <div style={{textAlign:"right",fontSize:11,marginBottom:16}}>{toReiwa(d.settlementDT)}</div>
+      {sellers.map((s,i)=>signBlock(sellers.length>1?`売　主　${i+1}`:"売　主",s.name,s.addr,`s${i}`))}
+      {buyers.map((b,i)=>signBlock(buyers.length>1?`買　主　${i+1}`:"買　主",b.name,b.addr,`b${i}`))}
+      <DisclaimerBox cfg={cfg}/>
+      <div style={DOC.footer}>{co.companyName||""}　{co.companyTel?`TEL：${co.companyTel}`:""}{co.companyTel?"　":""}担当：{d.staff}</div>
+    </div>
+  );
+}
+
+// ===== UI部品 =====
+const iS={width:"100%",padding:"4px 6px",fontSize:11,border:"0.5px solid #ccc",borderRadius:4,background:"#fff",color:"#222",boxSizing:"border-box"};
+const NI=({val,onChange,step})=><input type="number" value={val} onChange={e=>onChange(e.target.value)} step={step||1} style={{...iS,textAlign:"right"}}/>;
+const TI=({val,onChange,placeholder})=><input type="text" value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder||""} style={iS}/>;
+const DI=({val,onChange})=><input type="date" value={val} onChange={e=>onChange(e.target.value)} style={iS}/>;
+const SI=({val,onChange,opts})=><select value={val} onChange={e=>onChange(e.target.value)} style={iS}>{opts.map(o=><option key={o}>{o}</option>)}</select>;
+const Sec=({label,color})=><div style={{fontSize:10,fontWeight:"bold",padding:"3px 6px",marginTop:8,marginBottom:2,background:color||"#eee",borderRadius:3,borderLeft:"3px solid #999"}}>{label}</div>;
+const F=({label,children,half})=><div style={{marginBottom:3,width:half?"50%":"100%",display:"inline-block",paddingRight:half?3:0,boxSizing:"border-box"}}><div style={{fontSize:10,color:"#666",marginBottom:1}}>{label}</div>{children}</div>;
+const TB=({val,onChange,opts})=><div style={{display:"flex",borderRadius:4,overflow:"hidden",border:"1px solid #ccc"}}>{opts.map(o=><button key={o} onClick={()=>onChange(o)} style={{flex:1,padding:"5px 0",fontSize:10,border:"none",cursor:"pointer",background:val===o?"#1a3a6b":"#f5f5f5",color:val===o?"#fff":"#333",fontWeight:val===o?"bold":"normal"}}>{o}</button>)}</div>;
+
+const TABS=["案内_売主","案内_買主","領収書","実測清算覚書","固都税清算書","管理費等清算書"];
+const TAB_COMPS=[SellerGuide,BuyerGuide,Receipt,CoverageMemo,TaxDoc,MgmtDoc];
+
+// ===== ログイン画面 =====
+function LoginScreen({onLogin,cfg}){
+  const [id,setId]=useState("");
+  const [pw,setPw]=useState("");
+  const [err,setErr]=useState("");
+  const co=cfg||{};
+  const doLogin=()=>{
+    if(id===cfg.loginId&&pw===cfg.loginPass){
+      try{localStorage.setItem(SK_AUTH,JSON.stringify({loggedIn:true,at:Date.now()}));}catch{}
+      onLogin();
+    }else{setErr("IDまたはパスワードが違います");}
+  };
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#1a3a6b 0%,#2a5aab 100%)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{background:"#fff",borderRadius:12,padding:"40px 36px",width:"90%",maxWidth:380,boxShadow:"0 8px 32px rgba(0,0,0,0.3)"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:22,fontWeight:"bold",color:"#1a3a6b",marginBottom:4}}>{co.companyName||"残金決済ツール Pro"}</div>
+          <div style={{fontSize:11,color:"#888"}}>残金決済・清算書作成システム</div>
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11,color:"#555",marginBottom:4}}>ログインID</div>
+          <input value={id} onChange={e=>setId(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()} placeholder="IDを入力" style={{...iS,padding:"10px 12px",fontSize:13}}/>
+        </div>
+        <div style={{marginBottom:20}}>
+          <div style={{fontSize:11,color:"#555",marginBottom:4}}>パスワード</div>
+          <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()} placeholder="パスワードを入力" style={{...iS,padding:"10px 12px",fontSize:13}}/>
+        </div>
+        {err&&<div style={{color:"#c00",fontSize:11,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={doLogin} style={{width:"100%",padding:"12px",background:"#1a3a6b",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontSize:14,fontWeight:"bold"}}>ログイン</button>
+        <div style={{marginTop:16,fontSize:10,color:"#aaa",textAlign:"center"}}>設定画面からIDとパスワードを変更できます</div>
+      </div>
+    </div>
+  );
+}
+
+// ===== 設定画面 =====
+function SettingsScreen({cfg,onSave,onClose}){
+  const [s,setS]=useState({...cfg});
+  const setF=k=>v=>setS(p=>({...p,[k]:v}));
+
+  // リスト操作
+  const addStaff=()=>setS(p=>({...p,staffList:[...p.staffList,""]}));
+  const setStaff=(i,v)=>setS(p=>{const a=[...p.staffList];a[i]=v;return{...p,staffList:a};});
+  const delStaff=(i)=>setS(p=>({...p,staffList:p.staffList.filter((_,j)=>j!==i)}));
+
+  const addBank=()=>setS(p=>({...p,bankAccounts:[...p.bankAccounts,{label:"",bankName:"",bankBranch:"",bankType:"普通",bankNo:"",bankHolder:""}]}));
+  const setBank=(i,k,v)=>setS(p=>{const a=[...p.bankAccounts];a[i]={...a[i],[k]:v};return{...p,bankAccounts:a};});
+  const delBank=(i)=>setS(p=>({...p,bankAccounts:p.bankAccounts.filter((_,j)=>j!==i)}));
+
+  const addShiho=()=>setS(p=>({...p,shihoShoshiList:[...p.shihoShoshiList,""]}));
+  const setShiho=(i,v)=>setS(p=>{const a=[...p.shihoShoshiList];a[i]=v;return{...p,shihoShoshiList:a};});
+  const delShiho=(i)=>setS(p=>({...p,shihoShoshiList:p.shihoShoshiList.filter((_,j)=>j!==i)}));
+
+  const doSave=()=>{saveSettings(s);onSave(s);onClose();};
+
+  const sS={border:"1px solid #ccc",borderRadius:4,padding:"4px 8px",fontSize:11,width:"100%",boxSizing:"border-box",background:"#fff"};
+
+  return(
+    <div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"flex-start",justifyContent:"center",zIndex:2000,overflowY:"auto",padding:"20px 0"}}>
+      <div style={{background:"#f5f7fa",borderRadius:12,width:"90%",maxWidth:620,boxShadow:"0 8px 32px rgba(0,0,0,0.3)",overflow:"hidden"}}>
+        <div style={{background:"#1a3a6b",color:"#fff",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:16,fontWeight:"bold"}}>⚙️ アカウント設定</span>
+          <button onClick={onClose} style={{background:"rgba(255,255,255,0.2)",border:"none",color:"#fff",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:13}}>✕ 閉じる</button>
+        </div>
+        <div style={{padding:"16px 20px",maxHeight:"80vh",overflowY:"auto"}}>
+
+          {/* 会社情報 */}
+          <Sec label="🏢 会社情報" color="#dce6f1"/>
+          <F label="会社名"><input value={s.companyName} onChange={e=>setF("companyName")(e.target.value)} style={sS} placeholder="例：〇〇不動産株式会社"/></F>
+          <F label="会社名（英語）"><input value={s.companyNameEn} onChange={e=>setF("companyNameEn")(e.target.value)} style={sS} placeholder="例：XX Real Estate Co., Ltd."/></F>
+          <div style={{display:"flex",gap:6}}>
+            <F label="代表電話番号" half><input value={s.companyTel} onChange={e=>setF("companyTel")(e.target.value)} style={sS} placeholder="例：076-000-0000"/></F>
+            <F label="固都税デフォルト起算日" half>
+              <select value={s.defaultTaxBase} onChange={e=>setF("defaultTaxBase")(e.target.value)} style={sS}>
+                <option>4/1</option><option>1/1</option>
+              </select>
+            </F>
+          </div>
+          <F label="会社住所"><input value={s.companyAddress} onChange={e=>setF("companyAddress")(e.target.value)} style={sS} placeholder="例：〇〇市△△町1-2-3"/></F>
+
+          {/* 担当者リスト */}
+          <Sec label="👤 担当者リスト" color="#e8d0ff"/>
+          {s.staffList.map((st,i)=>(
+            <div key={i} style={{display:"flex",gap:4,marginBottom:4,alignItems:"center"}}>
+              <input value={st} onChange={e=>setStaff(i,e.target.value)} style={{...sS,flex:1}} placeholder="担当者名"/>
+              {s.staffList.length>1&&<button onClick={()=>delStaff(i)} style={{background:"#fdd",border:"1px solid #c66",color:"#c00",borderRadius:4,padding:"3px 8px",cursor:"pointer",fontSize:11}}>削除</button>}
+            </div>
+          ))}
+          <button onClick={addStaff} style={{width:"100%",padding:"5px",background:"#e8d0ff",border:"1px solid #9a6bc0",borderRadius:4,cursor:"pointer",fontSize:11,color:"#5a1a8b"}}>＋ 担当者を追加</button>
+
+          {/* 振込先口座 */}
+          <Sec label="🏦 振込先口座（複数登録可）" color="#d0e8ff"/>
+          {s.bankAccounts.map((b,i)=>(
+            <div key={i} style={{border:"1px solid #b0c8e8",borderRadius:6,padding:"10px",marginBottom:8,background:"#fff"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <span style={{fontSize:11,fontWeight:"bold",color:"#1a3a6b"}}>口座 {i+1}</span>
+                {s.bankAccounts.length>1&&<button onClick={()=>delBank(i)} style={{background:"#fdd",border:"1px solid #c66",color:"#c00",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10}}>削除</button>}
+              </div>
+              <F label="ラベル（選択肢に表示）"><input value={b.label} onChange={e=>setBank(i,"label",e.target.value)} style={sS} placeholder="例：メイン口座・北陸銀行"/></F>
+              <div style={{display:"flex",gap:4}}>
+                <F label="銀行名" half><input value={b.bankName} onChange={e=>setBank(i,"bankName",e.target.value)} style={sS} placeholder="〇〇銀行"/></F>
+                <F label="支店名" half><input value={b.bankBranch} onChange={e=>setBank(i,"bankBranch",e.target.value)} style={sS} placeholder="△△支店"/></F>
+              </div>
+              <div style={{display:"flex",gap:4}}>
+                <F label="種別" half>
+                  <select value={b.bankType} onChange={e=>setBank(i,"bankType",e.target.value)} style={sS}><option>普通</option><option>当座</option></select>
+                </F>
+                <F label="口座番号" half><input value={b.bankNo} onChange={e=>setBank(i,"bankNo",e.target.value)} style={sS} placeholder="1234567"/></F>
+              </div>
+              <F label="口座名義"><input value={b.bankHolder} onChange={e=>setBank(i,"bankHolder",e.target.value)} style={sS} placeholder="名義人名"/></F>
+            </div>
+          ))}
+          <button onClick={addBank} style={{width:"100%",padding:"5px",background:"#d0e8ff",border:"1px solid #6096c8",borderRadius:4,cursor:"pointer",fontSize:11,color:"#1a3a6b"}}>＋ 口座を追加</button>
+
+          {/* 司法書士リスト */}
+          <Sec label="🖊 司法書士リスト" color="#d0fdd0"/>
+          {s.shihoShoshiList.map((sh,i)=>(
+            <div key={i} style={{display:"flex",gap:4,marginBottom:4,alignItems:"center"}}>
+              <input value={sh} onChange={e=>setShiho(i,e.target.value)} style={{...sS,flex:1}} placeholder="事務所名・電話番号　例：〇〇司法書士事務所　076-000-0000"/>
+              <button onClick={()=>delShiho(i)} style={{background:"#fdd",border:"1px solid #c66",color:"#c00",borderRadius:4,padding:"3px 8px",cursor:"pointer",fontSize:11}}>削除</button>
+            </div>
+          ))}
+          <button onClick={addShiho} style={{width:"100%",padding:"5px",background:"#d0fdd0",border:"1px solid #4a9a6a",borderRadius:4,cursor:"pointer",fontSize:11,color:"#1a6b3a"}}>＋ 司法書士を追加</button>
+          <div style={{fontSize:10,color:"#888",marginTop:4}}>※「その他」を最後に追加しておくと、自由入力ができます</div>
+
+          {/* インフラ連絡先 */}
+          <Sec label="⚡ インフラ連絡先" color="#fde8cc"/>
+          <div style={{display:"flex",gap:4}}>
+            <F label="電気会社名" half><input value={s.infraElecName} onChange={e=>setF("infraElecName")(e.target.value)} style={sS} placeholder="例：北陸電力"/></F>
+            <F label="電話番号" half><input value={s.infraElecTel} onChange={e=>setF("infraElecTel")(e.target.value)} style={sS} placeholder="例：0120-776-453"/></F>
+          </div>
+          <div style={{display:"flex",gap:4}}>
+            <F label="水道局名" half><input value={s.infraWaterName} onChange={e=>setF("infraWaterName")(e.target.value)} style={sS} placeholder="例：〇〇市水道局"/></F>
+            <F label="電話番号" half><input value={s.infraWaterTel} onChange={e=>setF("infraWaterTel")(e.target.value)} style={sS} placeholder="例：076-000-0000"/></F>
+          </div>
+          <div style={{display:"flex",gap:4}}>
+            <F label="ガス会社名" half><input value={s.infraGasName} onChange={e=>setF("infraGasName")(e.target.value)} style={sS} placeholder="例：日本海ガス"/></F>
+            <F label="電話番号" half><input value={s.infraGasTel} onChange={e=>setF("infraGasTel")(e.target.value)} style={sS} placeholder="例：0570-024-077"/></F>
+          </div>
+
+          {/* 覚書条項番号 */}
+          <Sec label="📝 実測清算覚書　条項番号設定" color="#fff3cd"/>
+          <div style={{fontSize:10,color:"#666",marginBottom:6,lineHeight:1.6}}>
+            使用している売買契約書の条項番号を設定してください。<br/>
+            物件種別（戸建・土地）ごとに別々に設定できます。<br/>
+            <span style={{color:"#8b5000"}}>※ 数字のみ入力（例：「3」と入力すると帳票に「第三条」と表示されます）</span>
+          </div>
+          {[
+            {key:"tatemono",label:"🏠 戸建"},
+            {key:"tochi",label:"🌍 土地"},
+          ].map(({key,label})=>(
+            <div key={key} style={{border:"1px solid #d4a800",borderRadius:6,padding:"10px 12px",marginBottom:10,background:"#fffdf0"}}>
+              <div style={{fontSize:11,fontWeight:"bold",color:"#8b5000",marginBottom:8}}>{label}　用の条項番号</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                <F label="〇条：売買の目的物及び売買代金">
+                  <input type="number" min="1" max="30" value={s[`memo_${key}ArticleA`]||""} onChange={e=>setF(`memo_${key}ArticleA`)(e.target.value)} style={{...sS,textAlign:"center"}} placeholder="例：1"/>
+                </F>
+                <F label="△条：測量図の引渡し及び境界の明示">
+                  <input type="number" min="1" max="30" value={s[`memo_${key}ArticleB`]||""} onChange={e=>setF(`memo_${key}ArticleB`)(e.target.value)} style={{...sS,textAlign:"center"}} placeholder="例：3"/>
+                </F>
+                <F label="□条：売買代金の支払時期及びその方法">
+                  <input type="number" min="1" max="30" value={s[`memo_${key}ArticleC`]||""} onChange={e=>setF(`memo_${key}ArticleC`)(e.target.value)} style={{...sS,textAlign:"center"}} placeholder="例：5"/>
+                </F>
+                <F label="☆条：売買代金の清算">
+                  <input type="number" min="1" max="30" value={s[`memo_${key}ArticleD`]||""} onChange={e=>setF(`memo_${key}ArticleD`)(e.target.value)} style={{...sS,textAlign:"center"}} placeholder="例：6"/>
+                </F>
+              </div>
+              <div style={{marginTop:8,padding:"6px 10px",background:"#fff8e0",borderRadius:4,fontSize:10,color:"#555",lineHeight:1.8}}>
+                <strong>プレビュー：</strong><br/>
+                …（以下「本契約書」という。）<strong>第{s[`memo_${key}ArticleB`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleB`]]||s[`memo_${key}ArticleB`])+"]":"△"}条</strong>、<strong>第{s[`memo_${key}ArticleD`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleD`]]||s[`memo_${key}ArticleD`])+"]":"☆"}条</strong>規定の事項に関し…<br/>
+                １．…本契約書<strong>第{s[`memo_${key}ArticleB`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleB`]]||s[`memo_${key}ArticleB`])+"]":"△"}条</strong>規定の実測の結果…<br/>
+                ２．…本契約書<strong>第{s[`memo_${key}ArticleA`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleA`]]||s[`memo_${key}ArticleA`])+"]":"〇"}条</strong>規定の売買代金は…<strong>第{s[`memo_${key}ArticleD`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleD`]]||s[`memo_${key}ArticleD`])+"]":"☆"}条</strong>の規定により…<br/>
+                ３．…<strong>第{s[`memo_${key}ArticleC`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleC`]]||s[`memo_${key}ArticleC`])+"]":"□"}条</strong>および第<strong>{s[`memo_${key}ArticleD`]?"["+({"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}[s[`memo_${key}ArticleD`]]||s[`memo_${key}ArticleD`])+"]":"☆"}条</strong>に定める残代金…
+              </div>
+            </div>
+          ))}
+
+          {/* ログイン設定 */}
+          <Sec label="🔐 ログイン設定" color="#ffe8e8"/>
+          <div style={{...DOC.warningBox,fontSize:10,marginTop:6}}>⚠ IDとパスワードを変更後は、次回から新しい情報でログインしてください。</div>
+          <div style={{display:"flex",gap:4}}>
+            <F label="ログインID" half><input value={s.loginId} onChange={e=>setF("loginId")(e.target.value)} style={sS}/></F>
+            <F label="パスワード" half><input value={s.loginPass} onChange={e=>setF("loginPass")(e.target.value)} style={sS}/></F>
+          </div>
+
+          {/* その他 */}
+          <Sec label="📄 その他" color="#eee"/>
+          <F label="免責事項を帳票に表示">
+            <div style={{display:"flex",borderRadius:4,overflow:"hidden",border:"1px solid #ccc"}}>
+              {[["表示",true],["非表示",false]].map(([l,v])=>(
+                <button key={l} onClick={()=>setF("showDisclaimer")(v)} style={{flex:1,padding:"5px",border:"none",cursor:"pointer",background:s.showDisclaimer===v?"#1a3a6b":"#f5f5f5",color:s.showDisclaimer===v?"#fff":"#333",fontSize:10}}>{l}</button>
+              ))}
+            </div>
+          </F>
+
+          <div style={{marginTop:20,display:"flex",gap:8}}>
+            <button onClick={doSave} style={{flex:2,padding:"12px",background:"#1a3a6b",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontWeight:"bold",fontSize:13}}>💾 設定を保存</button>
+            <button onClick={onClose} style={{flex:1,padding:"12px",background:"#888",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontSize:13}}>キャンセル</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== メインアプリ =====
+function App(){
+  const [cfg,setCfg]=useState(loadSettings);
+  const [loggedIn,setLoggedIn]=useState(()=>{
+    try{const a=localStorage.getItem(SK_AUTH);if(a){const p=JSON.parse(a);if(p.loggedIn&&(Date.now()-p.at)<86400000*7)return true;}return false;}catch{return false;}
+  });
+  const [d,setD]=useState(()=>makeINIT(loadSettings()));
+  const [tab,setTab]=useState(0);
+  const [spTab,setSpTab]=useState("input");
+  const [showHist,setShowHist]=useState(false);
+  const [saved,setSaved]=useState([]);
+  const [saveName,setSaveName]=useState("");
+  const [showSaveDlg,setShowSaveDlg]=useState(false);
+  const [delConf,setDelConf]=useState(null);
+  const [curId,setCurId]=useState(null);
+  const [curName,setCurName]=useState("");
+  const [winW,setWinW]=useState(window.innerWidth);
+  const [showSettings,setShowSettings]=useState(false);
+  const c=useMemo(()=>calcAll(d,cfg),[d,cfg]);
+  const sp=winW<=1024;
+
+  useEffect(()=>{try{const s=localStorage.getItem(SK_CASES);if(s)setSaved(JSON.parse(s));}catch{};},[]);
+  useEffect(()=>{const fn=()=>setWinW(window.innerWidth);window.addEventListener("resize",fn);return()=>window.removeEventListener("resize",fn);},[]);
+
+  const set=k=>v=>{setD(p=>{const next={...p,[k]:v};if(k==="txType")setTab(v==="売主"?0:1);return next;});};
+  const setSeller=(i,field,val)=>setD(p=>{const ns=[...getSellers(p)];ns[i]={...ns[i],[field]:val};return{...p,sellers:ns};});
+  const addSeller=()=>setD(p=>({...p,sellers:[...getSellers(p),{name:"",addr:""}]}));
+  const delSeller=(i)=>setD(p=>({...p,sellers:getSellers(p).filter((_,j)=>j!==i)}));
+  const setBuyer=(i,field,val)=>setD(p=>{const nb=[...getBuyers(p)];nb[i]={...nb[i],[field]:val};return{...p,buyers:nb};});
+  const addBuyer=()=>setD(p=>({...p,buyers:[...getBuyers(p),{name:"",addr:""}]}));
+  const delBuyer=(i)=>setD(p=>({...p,buyers:getBuyers(p).filter((_,j)=>j!==i)}));
+
+  const doSave=()=>{
+    const name=saveName||`${getSellerName(d)}→${getBuyerName(d)} (${d.settlementDT})`;
+    const nc={id:Date.now(),name,savedAt:new Date().toLocaleString("ja-JP"),data:d};
+    const upd=[nc,...saved].slice(0,50);
+    setSaved(upd);setCurId(nc.id);setCurName(name);
+    try{localStorage.setItem(SK_CASES,JSON.stringify(upd));}catch{}
+    setShowSaveDlg(false);setSaveName("");
+  };
+  const doOverwrite=()=>{const upd=saved.map(i=>i.id===curId?{...i,data:d,savedAt:new Date().toLocaleString("ja-JP")}:i);setSaved(upd);try{localStorage.setItem(SK_CASES,JSON.stringify(upd));}catch{};};
+  const doLoad=item=>{setD(item.data);setCurId(item.id);setCurName(item.name);setShowHist(false);};
+  const doDel=id=>{const upd=saved.filter(i=>i.id!==id);setSaved(upd);if(id===curId){setCurId(null);setCurName("");}try{localStorage.setItem(SK_CASES,JSON.stringify(upd));}catch{};setDelConf(null);};
+  const doNew=()=>{if(window.confirm("現在の入力内容をクリアして新規作成しますか？")){setD(makeINIT(cfg));setCurId(null);setCurName("");}};
+  const doLogout=()=>{try{localStorage.removeItem(SK_AUTH);}catch{}setLoggedIn(false);};
+
+  const TabComp=TAB_COMPS[tab];
+
+  // 司法書士リスト（設定から）
+  const shihoOpts=[...cfg.shihoShoshiList];
+  if(!shihoOpts.includes("その他"))shihoOpts.push("その他");
+
+  // 振込先ラベル一覧
+  const bankLabels=(cfg.bankAccounts||[]).map(b=>b.label||`口座${cfg.bankAccounts.indexOf(b)+1}`);
+
+  if(!loggedIn)return<LoginScreen onLogin={()=>setLoggedIn(true)} cfg={cfg}/>;
+
+  const InputPanel=(
+    <div style={{width:sp?"100%":290,flexShrink:0,overflowY:"auto",background:"#fff",borderRight:sp?"none":"1px solid #ddd",padding:"8px 10px",height:"100%",boxSizing:"border-box"}}>
+      {curId&&curName&&<div style={{background:"#eef3fb",border:"1px solid #b0c8e8",borderRadius:4,padding:"4px 8px",marginBottom:4,fontSize:10,color:"#1a3a6b"}}>✏️ 編集中：<strong>{curName}</strong></div>}
+      <div style={{display:"flex",gap:4,marginBottom:8}}>
+        {curId?<><button onClick={doOverwrite} style={{flex:2,padding:"6px 0",fontSize:11,background:"#1a3a6b",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold"}}>💾 上書き保存</button><button onClick={()=>setShowSaveDlg(true)} style={{flex:2,padding:"6px 0",fontSize:11,background:"#4a7ab5",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold"}}>📋 別名保存</button></>:<button onClick={()=>setShowSaveDlg(true)} style={{flex:2,padding:"6px 0",fontSize:11,background:"#1a3a6b",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold"}}>💾 保存</button>}
+        <button onClick={()=>setShowHist(true)} style={{flex:2,padding:"6px 0",fontSize:11,background:"#555",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold"}}>📂 履歴({saved.length})</button>
+        <button onClick={doNew} style={{flex:1,padding:"6px 0",fontSize:11,background:"#888",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold"}}>＋新規</button>
+      </div>
+
+      <Sec label="基本情報・物件情報" color="#d0e8ff"/>
+      <F label="取引種別"><TB val={d.txType} onChange={set("txType")} opts={["売主","買主"]}/></F>
+      <F label="物件種別"><SI val={d.propType} onChange={set("propType")} opts={["戸建","マンション","土地"]}/></F>
+      <F label="物件所在地（買主の新住所）">
+        <div style={{display:"flex",gap:3,marginBottom:2,alignItems:"center"}}>
+          <span style={{fontSize:11,whiteSpace:"nowrap"}}>〒</span>
+          <input placeholder="郵便番号7桁" value={d.addressZip} onChange={e=>setD(p=>({...p,addressZip:e.target.value.replace(/[^0-9]/g,"").slice(0,7)}))} style={{...iS,width:"50%"}}/>
+          {d.addressZip.length===7&&<span style={{fontSize:10,color:"#1a3a6b",fontWeight:"bold"}}>〒{d.addressZip.slice(0,3)}-{d.addressZip.slice(3)}</span>}
+        </div>
+        <TI val={d.address} onChange={set("address")} placeholder="住所を入力"/>
+      </F>
+
+      <F label="売主">
+        {getSellers(d).map((s,i)=>(
+          <div key={i} style={{border:"1px solid #eee",borderRadius:4,padding:"6px",marginBottom:4,background:"#fff8f8"}}>
+            <div style={{fontSize:10,color:"#888",marginBottom:2}}>売主{getSellers(d).length>1?` ${i+1}`:""}</div>
+            <TI val={s.name} onChange={v=>setSeller(i,"name",v)} placeholder="氏名"/>
+            <div style={{marginTop:3}}><TI val={s.addr} onChange={v=>setSeller(i,"addr",v)} placeholder="住所"/></div>
+            {getSellers(d).length>1&&<button onClick={()=>delSeller(i)} style={{fontSize:10,color:"#c00",background:"none",border:"none",cursor:"pointer",marginTop:3}}>✕ 削除</button>}
+          </div>
+        ))}
+        <button onClick={addSeller} style={{fontSize:11,padding:"4px 0",background:"#fde8e8",border:"1px solid #c66",borderRadius:4,cursor:"pointer",color:"#8b0000",width:"100%"}}>＋ 売主を追加</button>
+      </F>
+
+      <F label="買主">
+        {getBuyers(d).map((b,i)=>(
+          <div key={i} style={{border:"1px solid #eee",borderRadius:4,padding:"6px",marginBottom:4,background:"#f0fff4"}}>
+            <div style={{fontSize:10,color:"#888",marginBottom:2}}>買主{getBuyers(d).length>1?` ${i+1}`:""}</div>
+            <TI val={b.name} onChange={v=>setBuyer(i,"name",v)} placeholder="氏名"/>
+            <div style={{marginTop:3}}><TI val={b.addr} onChange={v=>setBuyer(i,"addr",v)} placeholder="住所（覚書用）"/></div>
+            {getBuyers(d).length>1&&<button onClick={()=>delBuyer(i)} style={{fontSize:10,color:"#c00",background:"none",border:"none",cursor:"pointer",marginTop:3}}>✕ 削除</button>}
+          </div>
+        ))}
+        <button onClick={addBuyer} style={{fontSize:11,padding:"4px 0",background:"#dcfde8",border:"1px solid #4a6",borderRadius:4,cursor:"pointer",color:"#1a6b3a",width:"100%"}}>＋ 買主を追加</button>
+      </F>
+
+      <F label="ご契約日"><DI val={d.contractDate} onChange={set("contractDate")}/></F>
+      <div style={{display:"flex",gap:3}}>
+        <F label="決済日" half><DI val={d.settlementDT} onChange={set("settlementDT")}/></F>
+        <F label="時間" half><input type="time" value={d.settlementTime} onChange={e=>set("settlementTime")(e.target.value)} style={iS}/></F>
+      </div>
+      <F label="決済集合"><TB val={d.gathering} onChange={set("gathering")} opts={["あり","なし"]}/></F>
+      {d.gathering==="あり"&&<F label="決済場所"><TI val={d.gatheringPlace} onChange={set("gatheringPlace")}/></F>}
+      {bankLabels.length>0&&<F label="当社振込先"><SI val={d.viviBank} onChange={set("viviBank")} opts={bankLabels}/></F>}
+
+      <Sec label="司法書士・本人面談" color="#e8d0ff"/>
+      <F label="担当司法書士"><SI val={d.shihoShoshi} onChange={set("shihoShoshi")} opts={shihoOpts}/></F>
+      {d.shihoShoshi==="その他"&&<F label="司法書士名・電話番号"><TI val={d.shihoShoshiOther} onChange={set("shihoShoshiOther")} placeholder="事務所名・電話番号"/></F>}
+      <F label="売主：本人面談"><TB val={d.mendan} onChange={set("mendan")} opts={["あり","なし"]}/></F>
+      {d.mendan==="あり"&&<>
+        <div style={{display:"flex",gap:3}}><F label="面談日" half><DI val={d.mendanDT} onChange={set("mendanDT")}/></F><F label="時間" half><input type="time" value={d.mendanTime} onChange={e=>set("mendanTime")(e.target.value)} style={iS}/></F></div>
+        <F label="面談場所"><TI val={d.mendanPlace} onChange={set("mendanPlace")} placeholder="場所を入力"/></F>
+      </>}
+      <F label="買主：本人面談"><TB val={d.bMendan} onChange={set("bMendan")} opts={["あり","なし"]}/></F>
+      {d.bMendan==="あり"&&<>
+        {d.gathering==="なし"&&d.loanUse==="あり"&&<F label="本人面談のタイミング"><TB val={d.bMendanTiming} onChange={set("bMendanTiming")} opts={["本人面談を別途実施","金消契約時に併せて実施"]}/></F>}
+        {!(d.gathering==="なし"&&d.loanUse==="あり"&&d.bMendanTiming==="金消契約時に併せて実施")&&<>
+          <div style={{display:"flex",gap:3}}><F label="面談日" half><DI val={d.bMendanDT} onChange={set("bMendanDT")}/></F><F label="時間" half><input type="time" value={d.bMendanTime} onChange={e=>set("bMendanTime")(e.target.value)} style={iS}/></F></div>
+          <F label="面談場所"><TI val={d.bMendanPlace} onChange={set("bMendanPlace")} placeholder="場所を入力"/></F>
+        </>}
+      </>}
+
+      <Sec label="取引金額・清算金" color="#d0e8ff"/>
+      <F label="売買代金(円)"><NI val={d.salePrice} onChange={set("salePrice")}/></F>
+      <F label="受領済手付金(円)"><NI val={d.deposit} onChange={set("deposit")}/></F>
+      <F label="平米単価(円・実測清算時のみ)"><NI val={d.unitPrice} onChange={set("unitPrice")} step="0.01"/></F>
+      <div style={{display:"flex",gap:3}}>
+        <F label="公簿面積(㎡)" half><NI val={d.officialArea} onChange={set("officialArea")} step="0.01"/></F>
+        <F label="実測面積(㎡)" half><NI val={d.actualArea} onChange={set("actualArea")} step="0.01"/></F>
+      </div>
+      {num(d.unitPrice)>0&&num(d.actualArea)>0&&num(d.officialArea)>0&&<div style={{fontSize:10,padding:"3px 6px",background:"#e8f4ff",borderRadius:3,marginBottom:3}}>実測残代金：{fmt(Math.floor(num(d.unitPrice)*num(d.actualArea))-Math.round(num(d.deposit)))}円</div>}
+      <F label="固都税年額(円)"><NI val={d.taxAnnual} onChange={set("taxAnnual")}/></F>
+      <F label="都市計画税">
+        <div style={{display:"flex",borderRadius:4,overflow:"hidden",border:"1px solid #ccc"}}>
+          {[["あり","あり（固定資産税及び都市計画税）"],["なし","なし（固定資産税のみ）"]].map(([v,l])=>(
+            <button key={v} onClick={()=>set("cityTax")(v)} style={{flex:1,padding:"5px 4px",fontSize:9,border:"none",cursor:"pointer",background:d.cityTax===v?"#1a3a6b":"#f5f5f5",color:d.cityTax===v?"#fff":"#333",fontWeight:d.cityTax===v?"bold":"normal"}}>{l}</button>
+          ))}
+        </div>
+      </F>
+      <F label="固都税起算日"><SI val={d.taxBase} onChange={set("taxBase")} opts={["4/1","1/1"]}/></F>
+      <F label="固都税端数処理"><TB val={d.taxRounding} onChange={set("taxRounding")} opts={["切り捨て","四捨五入"]}/></F>
+      <F label="越年精算"><TB val={d.overYear} onChange={set("overYear")} opts={["なし","あり"]}/></F>
+      {d.propType==="マンション"&&<>
+        <F label="管理費等(月額・円)"><NI val={d.mgmtMonthly} onChange={set("mgmtMonthly")}/></F>
+        <F label="修繕積立金(月額・円)"><NI val={d.repairMonthly} onChange={set("repairMonthly")}/></F>
+        <div style={{display:"flex",gap:3}}>
+          <F label="その他項目名（任意）" half><TI val={d.mgmtOtherLabel} onChange={set("mgmtOtherLabel")} placeholder="例：駐車場代"/></F>
+          <F label="月額(円)" half><NI val={d.mgmtOtherAmt} onChange={set("mgmtOtherAmt")}/></F>
+        </div>
+        <F label="管理費等の清算範囲">
+          <div style={{display:"flex",borderRadius:4,overflow:"hidden",border:"1px solid #ccc"}}>
+            {["当月のみ","翌月まで","翌々月まで"].map(opt=><button key={opt} onClick={()=>set("mgmtClearMonths")(opt)} style={{flex:1,padding:"5px 0",fontSize:10,border:"none",cursor:"pointer",background:d.mgmtClearMonths===opt?"#1a3a6b":"#f5f5f5",color:d.mgmtClearMonths===opt?"#fff":"#333",fontWeight:d.mgmtClearMonths===opt?"bold":"normal",borderRight:"1px solid #ccc"}}>{opt}</button>)}
+          </div>
+        </F>
+      </>}
+
+      <Sec label="売主様の設定" color="#fde0e0"/>
+      <F label="住宅ローン残債(円)"><NI val={d.loanBalance} onChange={set("loanBalance")}/></F>
+      <F label="仲介手数料(総額)"><NI val={d.sBrokerTotal} onChange={set("sBrokerTotal")}/></F>
+      <F label="受領済仲介手数料"><NI val={d.sBrokerPaid} onChange={set("sBrokerPaid")}/></F>
+      <F label="【代行】建物滅失・表示変更"><NI val={d.sProxy1} onChange={set("sProxy1")}/></F>
+      <F label="【代行】抵当権抹消"><NI val={d.sProxy2} onChange={set("sProxy2")}/></F>
+      <F label="【代行】測量費用"><NI val={d.sProxy3} onChange={set("sProxy3")}/></F>
+      <F label="【代行】建物解体費"><NI val={d.sProxy4} onChange={set("sProxy4")}/></F>
+      <F label="【代行】荷物片づけ"><NI val={d.sProxy5} onChange={set("sProxy5")}/></F>
+      <F label="【代行】その他経費"><NI val={d.sProxy6} onChange={set("sProxy6")}/></F>
+      <div style={{display:"flex",gap:3}}><F label="現金名目①" half><TI val={d.sCashLabel1} onChange={set("sCashLabel1")}/></F><F label="金額①" half><NI val={d.sCashAmt1} onChange={set("sCashAmt1")}/></F></div>
+      <div style={{display:"flex",gap:3}}><F label="現金名目②" half><TI val={d.sCashLabel2} onChange={set("sCashLabel2")}/></F><F label="金額②" half><NI val={d.sCashAmt2} onChange={set("sCashAmt2")}/></F></div>
+      <F label="登記識別情報通知通数"><SI val={String(d.sKenriCount)} onChange={set("sKenriCount")} opts={["0","1","2","3"]}/></F>
+      <F label="住民票通数"><SI val={String(d.sJuminCount)} onChange={set("sJuminCount")} opts={["0","1","2","3"]}/></F>
+      <F label="戸籍の附票の写し"><TB val={d.sKosekiHuhyo} onChange={set("sKosekiHuhyo")} opts={["表示","非表示"]}/></F>
+      <F label="印鑑証明通数"><SI val={String(d.sInkanCount)} onChange={set("sInkanCount")} opts={["0","1","2","3"]}/></F>
+      <F label="印鑑証明書注意事項"><TB val={d.showInkanWarning} onChange={set("showInkanWarning")} opts={["表示","非表示"]}/></F>
+      <F label="その他持参物①"><TI val={d.sExtraLabel1} onChange={set("sExtraLabel1")} placeholder="例：固定資産税納税通知書"/></F>
+      <F label="その他持参物②"><TI val={d.sExtraLabel2} onChange={set("sExtraLabel2")} placeholder="例：建物図面"/></F>
+      <F label="その他持参物③"><TI val={d.sExtraLabel3} onChange={set("sExtraLabel3")} placeholder="例：マンション管理費領収書"/></F>
+      <F label="振込先(銀行・支店)"><TI val={d.sellerBankName} onChange={set("sellerBankName")}/></F>
+      <div style={{display:"flex",gap:3}}><F label="種類" half><SI val={d.sellerBankType} onChange={set("sellerBankType")} opts={["普通","当座"]}/></F><F label="口座番号" half><TI val={d.sellerBankNo} onChange={set("sellerBankNo")}/></F></div>
+      <F label="口座名義"><TI val={d.sellerBankHolder} onChange={set("sellerBankHolder")}/></F>
+
+      <Sec label="買主様の設定" color="#d0fdd0"/>
+      <F label="仲介手数料(総額)"><NI val={d.bBrokerTotal} onChange={set("bBrokerTotal")}/></F>
+      <F label="受領済仲介手数料"><NI val={d.bBrokerPaid} onChange={set("bBrokerPaid")}/></F>
+      <F label="ローン利用"><TB val={d.loanUse} onChange={set("loanUse")} opts={["あり","なし"]}/></F>
+      {d.loanUse==="あり"&&<>
+        <F label="ローン融資額(円)"><NI val={d.loanAmount} onChange={set("loanAmount")}/></F>
+        <div style={{display:"flex",gap:3}}><F label="金消日" half><DI val={d.kinshoDT} onChange={set("kinshoDT")}/></F><F label="時間" half><input type="time" value={d.kinshoTime} onChange={e=>set("kinshoTime")(e.target.value)} style={iS}/></F></div>
+        <F label="金消場所"><TI val={d.kinshoPlace} onChange={set("kinshoPlace")}/></F>
+      </>}
+      <F label="新住所への事前移転"><TB val={d.preMove} onChange={set("preMove")} opts={["あり","なし"]}/></F>
+      <F label="金消用 住民票通数"><SI val={String(d.bJuminKinsho)} onChange={set("bJuminKinsho")} opts={["0","1","2","3"]}/></F>
+      <F label="金消用 印鑑証明通数"><SI val={String(d.bInkanKinsho)} onChange={set("bInkanKinsho")} opts={["0","1","2","3"]}/></F>
+      <F label="金消用 その他持参物"><TI val={d.bOtherKinsho} onChange={set("bOtherKinsho")}/></F>
+      {d.gathering==="あり"?<>
+        <F label="決済用 住民票通数"><SI val={String(d.bJuminSettle)} onChange={set("bJuminSettle")} opts={["0","1","2","3"]}/></F>
+        <F label="決済用 印鑑証明通数"><SI val={String(d.bInkanSettle)} onChange={set("bInkanSettle")} opts={["0","1","2","3"]}/></F>
+      </>:<>
+        <F label="振込決済用 住民票通数"><SI val={String(d.bJuminTransfer)} onChange={set("bJuminTransfer")} opts={["0","1","2","3"]}/></F>
+        <F label="振込決済用 印鑑証明通数"><SI val={String(d.bInkanTransfer)} onChange={set("bInkanTransfer")} opts={["0","1","2","3"]}/></F>
+      </>}
+      <F label="【代行】登記費用(円)"><NI val={d.bRegFee} onChange={set("bRegFee")}/></F>
+      <F label="リフォーム代(総額)"><NI val={d.reformTotal} onChange={set("reformTotal")}/></F>
+      <F label="決済時リフォーム手付"><TB val={d.reformDepositYN} onChange={set("reformDepositYN")} opts={["なし","あり"]}/></F>
+      {d.reformDepositYN==="あり"&&<F label="手付金額(円)"><NI val={d.reformDepositAmt} onChange={set("reformDepositAmt")}/></F>}
+      <F label="【代行】その他代行費用"><NI val={d.bOtherProxy} onChange={set("bOtherProxy")}/></F>
+      <F label="【引落】ローン諸費用"><NI val={d.bLoanFee} onChange={set("bLoanFee")}/></F>
+      <F label="【引落】火災保険料"><NI val={d.bFireInsurance} onChange={set("bFireInsurance")}/></F>
+      <F label="【引落】管理基金等"><NI val={d.bMgmtFund} onChange={set("bMgmtFund")}/></F>
+      <F label="【引落】振込手数料"><NI val={d.bTransferFee} onChange={set("bTransferFee")}/></F>
+      <F label="【引落】その他"><NI val={d.bOtherDraw} onChange={set("bOtherDraw")}/></F>
+      <div style={{display:"flex",gap:3}}><F label="現金名目①" half><TI val={d.bCashLabel1} onChange={set("bCashLabel1")}/></F><F label="金額①" half><NI val={d.bCashAmt1} onChange={set("bCashAmt1")}/></F></div>
+      <div style={{display:"flex",gap:3}}><F label="現金名目②" half><TI val={d.bCashLabel2} onChange={set("bCashLabel2")}/></F><F label="金額②" half><NI val={d.bCashAmt2} onChange={set("bCashAmt2")}/></F></div>
+      <F label="持参物フリー①"><TI val={d.bExtraLabel1} onChange={set("bExtraLabel1")} placeholder="例：通帳・キャッシュカード"/></F>
+      <F label="持参物フリー②"><TI val={d.bExtraLabel2} onChange={set("bExtraLabel2")} placeholder="例：固定資産税納税通知書"/></F>
+      <F label="持参物フリー③"><TI val={d.bExtraLabel3} onChange={set("bExtraLabel3")} placeholder="例：管理規約一式"/></F>
+      <Sec label="その他設定"/>
+      {cfg.staffList.length>0?
+        <F label="当社担当者名"><SI val={d.staff} onChange={set("staff")} opts={cfg.staffList}/></F>:
+        <F label="当社担当者名"><TI val={d.staff} onChange={set("staff")}/></F>
+      }
+      <div style={{height:20}}/>
+    </div>
+  );
+
+  const PreviewPanel=(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",height:"100%"}}>
+      <div style={{display:"flex",gap:4,padding:"6px 10px",flexWrap:"wrap",background:"#1a3a6b",alignItems:"center"}}>
+        {[["残代金",c.fRem,false],["売主受取(C)",c.aToS,c.overLoan],["買主総額(A)",c.tExpB,false],["自己資金",c.selfFunds,false],[d.cityTax==="あり"?"固定資産税等清算":"固定資産税清算",c.tBuy,false]].map(([lbl,val,warn])=>(
+          <div key={lbl} style={{flex:"1 1 70px",padding:"3px 6px",minWidth:60,background:warn?"#8b0000":"rgba(255,255,255,0.15)",borderRadius:4,border:"1px solid rgba(255,255,255,0.3)"}}>
+            <div style={{fontSize:8,color:"#cce"}}>{lbl}</div>
+            <div style={{fontSize:11,fontWeight:"bold",color:"#fff",fontVariantNumeric:"tabular-nums"}}>{fmt(val)}円</div>
+          </div>
+        ))}
+        {c.overLoan&&<div style={{flex:"0 0 100%",fontSize:10,color:"#ffc",background:"#8b0000",padding:"2px 10px",borderRadius:4}}>⚠ オーバーローン：売主様に {fmt(c.shortfall)}円 の持ち出しが発生します</div>}
+      </div>
+      <div style={{display:"flex",background:"#f0f0f0",borderBottom:"1px solid #ccc",paddingLeft:4,overflowX:"auto",flexShrink:0}}>
+        {TABS.map((t,i)=>(
+          <button key={t} onClick={()=>setTab(i)} style={{padding:"6px 8px",fontSize:sp?9:10,background:i===tab?"#fff":"transparent",border:"none",borderTop:i===tab?"2px solid #1a3a6b":"2px solid transparent",borderRight:"1px solid #ddd",cursor:"pointer",fontWeight:i===tab?"bold":"normal",color:i===tab?"#1a3a6b":"#555",whiteSpace:"nowrap"}}>{t}</button>
+        ))}
+        <div style={{flex:1}}/>
+        {!sp&&<button onClick={()=>window.print()} style={{fontSize:11,margin:"3px 8px",padding:"3px 12px",border:"1px solid #aaa",borderRadius:4,background:"#fff",cursor:"pointer",color:"#333",fontWeight:"bold"}}>🖨 印刷/PDF</button>}
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:sp?"8px":"14px 18px",background:"#d0d0d0"}}>
+        <div id="print-area" style={{maxWidth:680,margin:"0 auto",boxShadow:"0 2px 12px rgba(0,0,0,0.25)"}}>
+          <TabComp d={d} c={c} cfg={cfg}/>
+        </div>
+      </div>
+    </div>
+  );
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"#e8e8e8",fontSize:12}}>
+      {/* ヘッダーバー */}
+      <div style={{background:"#0d2a52",color:"#fff",padding:"5px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,zIndex:100}}>
+        <div style={{fontSize:13,fontWeight:"bold",color:"#cce"}}>
+          {cfg.companyName||"残金決済ツール Pro"} &nbsp;
+          <span style={{fontSize:10,fontWeight:"normal",opacity:0.7}}>残金決済・清算書作成システム</span>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setShowSettings(true)} style={{padding:"4px 10px",background:"rgba(255,255,255,0.15)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)",borderRadius:4,cursor:"pointer",fontSize:11}}>⚙️ 設定</button>
+          <button onClick={doLogout} style={{padding:"4px 10px",background:"rgba(255,255,255,0.1)",color:"#ccc",border:"1px solid rgba(255,255,255,0.2)",borderRadius:4,cursor:"pointer",fontSize:11}}>ログアウト</button>
+        </div>
+      </div>
+
+      {sp?(
+        <>
+          <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+            {spTab==="input"&&InputPanel}
+            {spTab==="preview"&&PreviewPanel}
+          </div>
+          <div style={{display:"flex",background:"#1a3a6b",borderTop:"2px solid #0d2a52",height:52,flexShrink:0}}>
+            <button onClick={()=>setSpTab("input")} style={{flex:1,background:spTab==="input"?"#fff":"transparent",color:spTab==="input"?"#1a3a6b":"#cce",border:"none",cursor:"pointer",fontSize:14,fontWeight:"bold"}}>📝 入力</button>
+            <button onClick={()=>setSpTab("preview")} style={{flex:1,background:spTab==="preview"?"#fff":"transparent",color:spTab==="preview"?"#1a3a6b":"#cce",border:"none",cursor:"pointer",fontSize:14,fontWeight:"bold"}}>👁 確認</button>
+          </div>
+        </>
+      ):(
+        <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+          {InputPanel}
+          {PreviewPanel}
+        </div>
+      )}
+
+      {/* 保存ダイアログ */}
+      {showSaveDlg&&(
+        <div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
+          <div style={{background:"#fff",borderRadius:8,padding:"24px",width:"90%",maxWidth:360,boxShadow:"0 4px 20px rgba(0,0,0,0.3)"}}>
+            <div style={{fontSize:14,fontWeight:"bold",marginBottom:12,color:"#1a3a6b"}}>💾 名前をつけて保存</div>
+            <input value={saveName} onChange={e=>setSaveName(e.target.value)} placeholder={`${getSellerName(d)}→${getBuyerName(d)} (${d.settlementDT})`} style={{...iS,marginBottom:16,fontSize:12}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={doSave} style={{flex:1,padding:"8px",background:"#1a3a6b",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontWeight:"bold",fontSize:12}}>保存する</button>
+              <button onClick={()=>{setShowSaveDlg(false);setSaveName("");}} style={{flex:1,padding:"8px",background:"#888",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontSize:12}}>キャンセル</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 履歴ダイアログ */}
+      {showHist&&(
+        <div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
+          <div style={{background:"#fff",borderRadius:8,padding:"24px",width:"90%",maxWidth:480,maxHeight:"80vh",display:"flex",flexDirection:"column",boxShadow:"0 4px 20px rgba(0,0,0,0.3)"}}>
+            <div style={{fontSize:14,fontWeight:"bold",marginBottom:12,color:"#1a3a6b"}}>📂 保存済み一覧</div>
+            {saved.length===0?(
+              <div style={{color:"#888",fontSize:12,textAlign:"center",padding:"20px 0"}}>保存されているデータはありません</div>
+            ):(
+              <div style={{overflowY:"auto",flex:1}}>
+                {saved.map(item=>(
+                  <div key={item.id} style={{border:`1px solid ${item.id===curId?"#1a3a6b":"#ddd"}`,borderRadius:6,padding:"10px 12px",marginBottom:8,background:item.id===curId?"#eef3fb":"#fafafa"}}>
+                    <div style={{fontWeight:"bold",fontSize:12,marginBottom:2,color:"#1a3a6b"}}>{item.name}</div>
+                    <div style={{fontSize:10,color:"#888",marginBottom:8}}>保存日時：{item.savedAt}</div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>doLoad(item)} style={{flex:1,padding:"5px",background:"#1a3a6b",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:"bold"}}>📥 読み込む</button>
+                      {delConf===item.id?(
+                        <><button onClick={()=>doDel(item.id)} style={{flex:1,padding:"5px",background:"#8b0000",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:"bold"}}>本当に削除</button><button onClick={()=>setDelConf(null)} style={{flex:1,padding:"5px",background:"#888",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontSize:11}}>キャンセル</button></>
+                      ):(
+                        <button onClick={()=>setDelConf(item.id)} style={{padding:"5px 12px",background:"#eee",color:"#666",border:"1px solid #ccc",borderRadius:4,cursor:"pointer",fontSize:11}}>🗑 削除</button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button onClick={()=>{setShowHist(false);setDelConf(null);}} style={{marginTop:12,padding:"8px",background:"#888",color:"#fff",border:"none",borderRadius:4,cursor:"pointer",fontSize:12}}>閉じる</button>
+          </div>
+        </div>
+      )}
+
+      {/* 設定画面 */}
+      {showSettings&&<SettingsScreen cfg={cfg} onSave={newCfg=>setCfg(newCfg)} onClose={()=>setShowSettings(false)}/>}
+
+      <style>{`@media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}body *{visibility:hidden!important}#print-area,#print-area *{visibility:visible!important}#print-area{position:absolute;top:0;left:0;width:100%;max-width:100%!important;box-shadow:none!important;margin:0!important}#print-area>div{padding:10mm 12mm!important;font-size:9.5pt!important;line-height:1.5!important}table{page-break-inside:avoid;border-collapse:collapse}tr{page-break-inside:avoid}@page{margin:0}}`}</style>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
